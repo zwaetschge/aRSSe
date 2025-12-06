@@ -1,0 +1,81 @@
+# ===========================================
+# aRSSe Intelligence Layer Configuration
+# ===========================================
+
+# Clustering-Konfiguration (DBSCAN)
+clustering:
+  # Epsilon: Maximale Distanz zwischen zwei Artikeln im selben Cluster
+  # Niedrigere Werte = striktere Gruppierung (0.3-0.5 empfohlen)
+  eps: 0.4
+
+  # Minimum Anzahl Artikel für einen Cluster
+  min_samples: 2
+
+  # Metrik für Ähnlichkeitsberechnung
+  metric: "cosine"
+
+  # Maximale Features für TF-IDF Vektorisierung
+  max_features: 5000
+
+  # Sprache für Stopwords
+  language: "german"
+
+# Deduplizierung
+deduplication:
+  # Schwellenwert für Duplikat-Erkennung (0.0-1.0)
+  # Höhere Werte = nur sehr ähnliche Artikel werden als Duplikate erkannt
+  threshold: 0.85
+
+  # Strategie zur Auswahl des "besten" Artikels
+  # Optionen: "longest", "source_priority", "newest"
+  canonical_strategy: "longest"
+
+  # Quellen-Priorisierung (höher = besser)
+  source_scores:
+    "sueddeutsche.de": 100
+    "zeit.de": 95
+    "spiegel.de": 90
+    "faz.net": 90
+    "tagesschau.de": 85
+    "heise.de": 80
+    "golem.de": 75
+
+  # Aktion für Duplikate
+  # Optionen: "tag", "mark_read", "hide"
+  duplicate_action: "tag"
+
+  # Tag-Name für Duplikate
+  duplicate_tag: "duplicate"
+
+# Scheduling
+scheduling:
+  # Intervall zwischen Clustering-Läufen (Minuten)
+  interval_minutes: 30
+
+  # Maximale Anzahl Artikel pro Durchlauf
+  batch_size: 1000
+
+  # Zeitfenster für Artikel-Analyse (Stunden)
+  lookback_hours: 24
+
+# Tagging
+tagging:
+  # Prefix für Cluster-Tags
+  cluster_prefix: "story"
+
+  # Maximale Anzahl Tags pro Artikel
+  max_tags: 5
+
+  # Bestehende Tags erhalten?
+  preserve_existing: true
+
+# Logging
+logging:
+  # Log-Level: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+
+  # JSON-Format für strukturierte Logs
+  json_format: false
+
+  # Log-Datei (leer = nur stdout)
+  file: ""

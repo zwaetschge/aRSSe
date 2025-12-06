@@ -1,0 +1,198 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>aRSSe-Miniflux</Name>
+  <Repository>miniflux/miniflux:latest</Repository>
+  <Registry>https://hub.docker.com/r/miniflux/miniflux</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/miniflux/v2/discussions</Support>
+  <Project>https://miniflux.app/</Project>
+  <Overview>
+    aRSSe - Autonomer RSS-basierter News-Aggregator
+
+    Ein selbstgehosteter Nachrichten-Aggregator, der die Kernfunktionalität
+    von Google News repliziert. Optimiert für E-Ink-Displays und
+    Mobile-First-Paradigmen.
+
+    Komponenten:
+    - Miniflux: Minimalistischer RSS-Reader (Go-basiert)
+    - PostgreSQL: Datenspeicher (separater Container erforderlich)
+    - Intelligence Layer: Python-basiertes Clustering (optional)
+
+    Erfordert einen separaten PostgreSQL-Container!
+  </Overview>
+  <Category>MediaApp:Other Tools:</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL>https://github.com/zwaetschge/aRSSe</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/miniflux/logo/master/icon.svg</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled></DateInstalled>
+  <DonateText>Support Miniflux Development</DonateText>
+  <DonateLink>https://github.com/sponsors/fguillot</DonateLink>
+  <Requires>PostgreSQL Container (z.B. postgres:15-alpine)</Requires>
+
+  <!-- Port Configuration -->
+  <Config
+    Name="Web Interface Port"
+    Target="8080"
+    Default="8080"
+    Mode="tcp"
+    Description="Port für das Miniflux Web-Interface"
+    Type="Port"
+    Display="always"
+    Required="true"
+    Mask="false">8080</Config>
+
+  <!-- Database Configuration -->
+  <Config
+    Name="Database URL"
+    Target="DATABASE_URL"
+    Default="postgres://miniflux:password@postgres/miniflux?sslmode=disable"
+    Mode=""
+    Description="PostgreSQL Verbindungs-URL. Format: postgres://user:password@host/database"
+    Type="Variable"
+    Display="always"
+    Required="true"
+    Mask="false">postgres://miniflux:password@postgres/miniflux?sslmode=disable</Config>
+
+  <!-- Admin Configuration -->
+  <Config
+    Name="Run Migrations"
+    Target="RUN_MIGRATIONS"
+    Default="1"
+    Mode=""
+    Description="Automatische Datenbank-Migrationen beim Start (1 = aktiviert)"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">1</Config>
+
+  <Config
+    Name="Create Admin"
+    Target="CREATE_ADMIN"
+    Default="1"
+    Mode=""
+    Description="Admin-Benutzer beim ersten Start erstellen (1 = aktiviert)"
+    Type="Variable"
+    Display="always"
+    Required="false"
+    Mask="false">1</Config>
+
+  <Config
+    Name="Admin Username"
+    Target="ADMIN_USERNAME"
+    Default="admin"
+    Mode=""
+    Description="Benutzername für den Admin-Account"
+    Type="Variable"
+    Display="always"
+    Required="true"
+    Mask="false">admin</Config>
+
+  <Config
+    Name="Admin Password"
+    Target="ADMIN_PASSWORD"
+    Default=""
+    Mode=""
+    Description="Passwort für den Admin-Account (ÄNDERN!)"
+    Type="Variable"
+    Display="always"
+    Required="true"
+    Mask="true"></Config>
+
+  <!-- Polling Configuration -->
+  <Config
+    Name="Polling Frequency (Minutes)"
+    Target="POLLING_FREQUENCY"
+    Default="15"
+    Mode=""
+    Description="Feed-Abrufintervall in Minuten. Niedrigere Werte = aktuellere News, aber mehr Last."
+    Type="Variable"
+    Display="always"
+    Required="false"
+    Mask="false">15</Config>
+
+  <Config
+    Name="Polling Scheduler"
+    Target="POLLING_SCHEDULER"
+    Default="entry_frequency"
+    Mode=""
+    Description="Scheduling-Strategie: round_robin oder entry_frequency (adaptiv)"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">entry_frequency</Config>
+
+  <Config
+    Name="Worker Pool Size"
+    Target="WORKER_POOL_SIZE"
+    Default="5"
+    Mode=""
+    Description="Anzahl paralleler Feed-Abruf-Prozesse"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">5</Config>
+
+  <!-- Cleanup Configuration -->
+  <Config
+    Name="Cleanup Read Days"
+    Target="CLEANUP_ARCHIVE_READ_DAYS"
+    Default="60"
+    Mode=""
+    Description="Gelesene Artikel nach X Tagen löschen"
+    Type="Variable"
+    Display="always"
+    Required="false"
+    Mask="false">60</Config>
+
+  <Config
+    Name="Cleanup Unread Days"
+    Target="CLEANUP_ARCHIVE_UNREAD_DAYS"
+    Default="30"
+    Mode=""
+    Description="Ungelesene Artikel nach X Tagen löschen"
+    Type="Variable"
+    Display="always"
+    Required="false"
+    Mask="false">30</Config>
+
+  <!-- External Access -->
+  <Config
+    Name="Base URL"
+    Target="BASE_URL"
+    Default=""
+    Mode=""
+    Description="Externe URL für PWA-Funktionalität (z.B. https://news.domain.com)"
+    Type="Variable"
+    Display="always"
+    Required="false"
+    Mask="false"></Config>
+
+  <!-- Metrics -->
+  <Config
+    Name="Enable Metrics"
+    Target="METRICS_COLLECTOR"
+    Default="1"
+    Mode=""
+    Description="Prometheus-Metriken aktivieren (1 = aktiviert)"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">1</Config>
+
+  <Config
+    Name="Metrics Networks"
+    Target="METRICS_ALLOWED_NETWORKS"
+    Default="172.16.0.0/12"
+    Mode=""
+    Description="Erlaubte Netzwerke für Metriken-Endpunkt"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">172.16.0.0/12</Config>
+</Container>

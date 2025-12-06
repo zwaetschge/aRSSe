@@ -1,0 +1,27 @@
+# aRSSe Intelligence Layer Dependencies
+
+# Miniflux API Client
+miniflux>=0.0.15
+
+# Machine Learning & NLP
+scikit-learn>=1.3.0
+numpy>=1.24.0
+
+# Text Processing
+nltk>=3.8.0
+
+# HTML Processing
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Configuration
+pyyaml>=6.0.0
+
+# Scheduling
+schedule>=1.2.0
+
+# HTTP Client
+requests>=2.31.0
+
+# Logging
+python-json-logger>=2.0.0

@@ -1,0 +1,109 @@
+version: '3.8'
+
+services:
+  # ============================================
+  # Miniflux - RSS Aggregator (Ingestion Layer)
+  # ============================================
+  miniflux:
+    image: miniflux/miniflux:latest
+    container_name: arsse-miniflux
+    ports:
+      - "${MINIFLUX_PORT:-8080}:8080"
+    environment:
+      # Datenbank-Verbindung
+      - DATABASE_URL=postgres://${POSTGRES_USER:-miniflux}:${POSTGRES_PASSWORD}@db/miniflux?sslmode=disable
+
+      # Automatische Migrationen und Admin-Erstellung
+      - RUN_MIGRATIONS=1
+      - CREATE_ADMIN=1
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+
+      # Polling-Konfiguration (Google-News-ähnliches Verhalten)
+      - POLLING_FREQUENCY=${POLLING_FREQUENCY:-15}
+      - POLLING_SCHEDULER=entry_frequency
+      - BATCH_SIZE=100
+      - WORKER_POOL_SIZE=5
+
+      # Content-Verarbeitung
+      - FETCH_YOUTUBE_WATCH_TIME=1
+      - FETCH_ODYSEE_WATCH_TIME=1
+
+      # Cleanup-Konfiguration (Freshness-Fokus)
+      - CLEANUP_FREQUENCY_HOURS=1
+      - CLEANUP_ARCHIVE_READ_DAYS=${CLEANUP_READ_DAYS:-60}
+      - CLEANUP_ARCHIVE_UNREAD_DAYS=${CLEANUP_UNREAD_DAYS:-30}
+      - CLEANUP_REMOVE_SESSIONS_DAYS=30
+
+      # Proxy-Unterstützung für externen Zugriff
+      - BASE_URL=${BASE_URL:-http://localhost:8080}
+
+      # Metriken für Monitoring
+      - METRICS_COLLECTOR=1
+      - METRICS_ALLOWED_NETWORKS=172.16.0.0/12
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - arsse-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/usr/bin/miniflux", "-healthcheck", "auto"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ============================================
+  # PostgreSQL - Datenspeicher (Storage Layer)
+  # ============================================
+  db:
+    image: postgres:15-alpine
+    container_name: arsse-db
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-miniflux}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=miniflux
+    volumes:
+      - ${DATA_PATH:-./data}/postgresql:/var/lib/postgresql/data
+    networks:
+      - arsse-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-miniflux} -d miniflux"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ============================================
+  # Intelligence Layer - Python Clustering Bot
+  # ============================================
+  intelligence:
+    build:
+      context: ./intelligence
+      dockerfile: Dockerfile
+    container_name: arsse-intelligence
+    environment:
+      - MINIFLUX_URL=http://miniflux:8080
+      - MINIFLUX_API_KEY=${MINIFLUX_API_KEY}
+      - CLUSTERING_INTERVAL=${CLUSTERING_INTERVAL:-30}
+      - CLUSTERING_EPS=${CLUSTERING_EPS:-0.4}
+      - CLUSTERING_MIN_SAMPLES=${CLUSTERING_MIN_SAMPLES:-2}
+      - DEDUP_THRESHOLD=${DEDUP_THRESHOLD:-0.85}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - TZ=${TZ:-Europe/Berlin}
+    volumes:
+      - ${DATA_PATH:-./data}/intelligence:/app/data
+      - ./intelligence/config.yaml:/app/config.yaml:ro
+    depends_on:
+      miniflux:
+        condition: service_healthy
+    networks:
+      - arsse-network
+    restart: unless-stopped
+
+networks:
+  arsse-network:
+    driver: bridge
+    name: arsse-network
