@@ -1,0 +1,1153 @@
+/**
+ * aRSSe PWA Shell: "Native Fluid"
+ * =================================
+ *
+ * A native app-like shell that transforms the web experience into
+ * something that feels at home on iOS and Android. Includes bottom
+ * navigation, spring animations, gesture feedback, and platform-aware
+ * safe areas.
+ *
+ * Layer this ON TOP of either eink-theme.css or color-theme.css
+ *
+ * Features:
+ * - Bottom tab navigation (iOS/Android pattern)
+ * - Safe area insets (notch, home indicator)
+ * - Pull-to-refresh visual feedback
+ * - Floating action button
+ * - Spring-based animations
+ * - Haptic-suggesting visual feedback
+ * - Swipe gesture affordances
+ * - Native-feeling modals and sheets
+ */
+
+/* ===========================================
+   WEB FONTS (if not already loaded)
+   =========================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap');
+
+/* ===========================================
+   CSS CUSTOM PROPERTIES - PWA Specific
+   =========================================== */
+
+:root {
+    /* Safe Areas - Will be overridden by env() */
+    --safe-area-top: env(safe-area-inset-top, 0px);
+    --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-area-left: env(safe-area-inset-left, 0px);
+    --safe-area-right: env(safe-area-inset-right, 0px);
+
+    /* PWA Shell Dimensions */
+    --pwa-header-height: 56px;
+    --pwa-bottom-nav-height: 64px;
+    --pwa-fab-size: 56px;
+    --pwa-tab-icon-size: 24px;
+
+    /* Animation Springs */
+    --spring-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+    --spring-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+    --spring-snappy: cubic-bezier(0.16, 1, 0.3, 1);
+
+    /* Touch Feedback */
+    --touch-highlight: rgba(0, 0, 0, 0.05);
+    --touch-ripple-light: rgba(255, 255, 255, 0.3);
+    --touch-ripple-dark: rgba(0, 0, 0, 0.1);
+
+    /* Z-Index Layers */
+    --z-content: 1;
+    --z-header: 100;
+    --z-bottom-nav: 100;
+    --z-fab: 90;
+    --z-sheet: 200;
+    --z-modal: 300;
+    --z-toast: 400;
+}
+
+/* Dark mode touch feedback */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --touch-highlight: rgba(255, 255, 255, 0.08);
+    }
+}
+
+/* ===========================================
+   PWA VIEWPORT SETUP
+   =========================================== */
+
+html {
+    /* Prevent overscroll bounce on iOS */
+    overscroll-behavior: none;
+    /* Smooth momentum scrolling */
+    -webkit-overflow-scrolling: touch;
+}
+
+body {
+    /* Account for bottom nav */
+    padding-bottom: calc(var(--pwa-bottom-nav-height) + var(--safe-area-bottom) + 16px);
+    /* Account for header */
+    padding-top: calc(var(--pwa-header-height) + var(--safe-area-top));
+    /* Prevent text selection on tap */
+    -webkit-user-select: none;
+    user-select: none;
+    /* Disable pull-to-refresh on body (we handle it custom) */
+    overscroll-behavior-y: contain;
+}
+
+/* Allow text selection in content areas */
+.entry-content,
+.item-content,
+article p,
+blockquote {
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+/* ===========================================
+   APP HEADER - Sticky Top Bar
+   =========================================== */
+
+.pwa-header,
+header,
+.header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: calc(var(--pwa-header-height) + var(--safe-area-top));
+    padding-top: var(--safe-area-top);
+    z-index: var(--z-header);
+
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-left: calc(16px + var(--safe-area-left));
+    padding-right: calc(16px + var(--safe-area-right));
+
+    /* Glassmorphism header */
+    background: rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+
+    /* iOS-style shadow */
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+
+    transition: transform 0.3s var(--spring-smooth);
+}
+
+/* Dark mode header */
+@media (prefers-color-scheme: dark) {
+    .pwa-header,
+    header,
+    .header {
+        background: rgba(20, 20, 28, 0.9);
+        border-bottom-color: rgba(255, 255, 255, 0.1);
+    }
+}
+
+/* Hide header on scroll down (add .header-hidden class via JS) */
+.header-hidden {
+    transform: translateY(-100%);
+}
+
+/* Header title */
+.pwa-header h1,
+header h1,
+.header h1 {
+    font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 1.125rem;
+    font-weight: 600;
+    margin: 0;
+    /* Remove any existing styles that conflict */
+    background: none;
+    -webkit-background-clip: unset;
+    -webkit-text-fill-color: unset;
+    text-shadow: none;
+    animation: none;
+    letter-spacing: -0.01em;
+}
+
+/* Header action buttons */
+.pwa-header-action {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+
+.pwa-header-action:hover {
+    background: var(--touch-highlight);
+}
+
+.pwa-header-action:active {
+    transform: scale(0.95);
+}
+
+/* ===========================================
+   BOTTOM NAVIGATION - Tab Bar
+   =========================================== */
+
+.pwa-bottom-nav,
+nav,
+.nav {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: calc(var(--pwa-bottom-nav-height) + var(--safe-area-bottom));
+    padding-bottom: var(--safe-area-bottom);
+    z-index: var(--z-bottom-nav);
+
+    display: flex;
+    align-items: stretch;
+    justify-content: space-around;
+
+    /* Glassmorphism */
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+
+    /* Remove existing nav styles */
+    border-bottom: none;
+    border-radius: 0;
+    max-width: none;
+    margin: 0;
+    padding-left: var(--safe-area-left);
+    padding-right: var(--safe-area-right);
+    gap: 0;
+    flex-wrap: nowrap;
+}
+
+/* Dark mode bottom nav */
+@media (prefers-color-scheme: dark) {
+    .pwa-bottom-nav,
+    nav,
+    .nav {
+        background: rgba(20, 20, 28, 0.95);
+        border-top-color: rgba(255, 255, 255, 0.1);
+    }
+}
+
+/* Tab items */
+.pwa-bottom-nav a,
+nav a,
+.nav a {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 8px 4px;
+    min-height: var(--pwa-bottom-nav-height);
+    text-decoration: none;
+    color: rgba(0, 0, 0, 0.5);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    transition:
+        color 0.2s ease,
+        transform 0.2s var(--spring-bounce);
+
+    /* Remove existing nav link styles */
+    border: none;
+    border-radius: 0;
+    background: none;
+    text-transform: none;
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-bottom-nav a,
+    nav a,
+    .nav a {
+        color: rgba(255, 255, 255, 0.5);
+    }
+}
+
+/* Tab icon placeholder (replace with actual icons) */
+.pwa-bottom-nav a::before,
+nav a::before,
+.nav a::before {
+    content: "";
+    width: var(--pwa-tab-icon-size);
+    height: var(--pwa-tab-icon-size);
+    background: currentColor;
+    border-radius: 6px;
+    opacity: 0.6;
+    transition: opacity 0.2s ease, transform 0.2s var(--spring-bounce);
+}
+
+/* Active tab */
+.pwa-bottom-nav a.active,
+nav a.active,
+.nav a.active {
+    color: #007AFF; /* iOS blue */
+    font-weight: 600;
+    /* Remove existing active styles */
+    background: none !important;
+    box-shadow: none;
+}
+
+.pwa-bottom-nav a.active::before,
+nav a.active::before,
+.nav a.active::before {
+    opacity: 1;
+    transform: scale(1.1);
+}
+
+/* Tab press feedback */
+.pwa-bottom-nav a:active,
+nav a:active,
+.nav a:active {
+    transform: scale(0.95);
+}
+
+/* Remove the active triangle indicator */
+nav a.active::after,
+.nav a.active::after {
+    display: none;
+}
+
+/* ===========================================
+   FLOATING ACTION BUTTON
+   =========================================== */
+
+.pwa-fab {
+    position: fixed;
+    bottom: calc(var(--pwa-bottom-nav-height) + var(--safe-area-bottom) + 16px);
+    right: calc(16px + var(--safe-area-right));
+    width: var(--pwa-fab-size);
+    height: var(--pwa-fab-size);
+    z-index: var(--z-fab);
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    background: linear-gradient(135deg, #007AFF 0%, #5856D6 100%);
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+
+    box-shadow:
+        0 4px 12px rgba(0, 122, 255, 0.4),
+        0 8px 24px rgba(0, 0, 0, 0.15);
+
+    transition:
+        transform 0.3s var(--spring-bounce),
+        box-shadow 0.3s ease;
+}
+
+.pwa-fab:hover {
+    transform: scale(1.08);
+    box-shadow:
+        0 6px 16px rgba(0, 122, 255, 0.5),
+        0 12px 32px rgba(0, 0, 0, 0.2);
+}
+
+.pwa-fab:active {
+    transform: scale(0.95);
+}
+
+/* FAB icon */
+.pwa-fab::before {
+    content: "+";
+    font-size: 28px;
+    font-weight: 300;
+    color: white;
+    line-height: 1;
+}
+
+/* Extended FAB with label */
+.pwa-fab.extended {
+    width: auto;
+    border-radius: 28px;
+    padding: 0 24px;
+    gap: 8px;
+}
+
+.pwa-fab.extended::before {
+    font-size: 24px;
+}
+
+/* ===========================================
+   ARTICLE CARDS - Touch Optimized
+   =========================================== */
+
+.item,
+article,
+.entry {
+    /* Touch feedback */
+    -webkit-tap-highlight-color: transparent;
+    cursor: pointer;
+
+    /* Smooth transitions */
+    transition:
+        transform 0.3s var(--spring-smooth),
+        box-shadow 0.3s ease,
+        opacity 0.2s ease;
+}
+
+/* Press state */
+.item:active,
+article:active,
+.entry:active {
+    transform: scale(0.98);
+    opacity: 0.9;
+}
+
+/* Swipe hint affordance (left border that suggests swipeable) */
+.item.swipeable::before,
+article.swipeable::before,
+.entry.swipeable::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 4px;
+    height: 40px;
+    background: rgba(0, 122, 255, 0.3);
+    border-radius: 0 4px 4px 0;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.item.swipeable:hover::before,
+article.swipeable:hover::before,
+.entry.swipeable:hover::before {
+    opacity: 1;
+}
+
+/* ===========================================
+   PULL TO REFRESH
+   =========================================== */
+
+.pwa-pull-indicator {
+    position: fixed;
+    top: calc(var(--pwa-header-height) + var(--safe-area-top) - 50px);
+    left: 50%;
+    transform: translateX(-50%) scale(0);
+    width: 40px;
+    height: 40px;
+    z-index: var(--z-header);
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    background: white;
+    border-radius: 50%;
+    box-shadow:
+        0 2px 8px rgba(0, 0, 0, 0.15),
+        0 4px 16px rgba(0, 0, 0, 0.1);
+
+    transition: transform 0.3s var(--spring-bounce);
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-pull-indicator {
+        background: #2c2c34;
+    }
+}
+
+/* Pull indicator spinner */
+.pwa-pull-indicator::before {
+    content: "";
+    width: 20px;
+    height: 20px;
+    border: 2px solid rgba(0, 122, 255, 0.2);
+    border-top-color: #007AFF;
+    border-radius: 50%;
+}
+
+/* States */
+.pwa-pull-indicator.pulling {
+    transform: translateX(-50%) scale(1);
+}
+
+.pwa-pull-indicator.refreshing::before {
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ===========================================
+   TOAST NOTIFICATIONS
+   =========================================== */
+
+.pwa-toast {
+    position: fixed;
+    bottom: calc(var(--pwa-bottom-nav-height) + var(--safe-area-bottom) + 16px);
+    left: 50%;
+    transform: translateX(-50%) translateY(100px);
+    z-index: var(--z-toast);
+
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 20px;
+    min-width: 200px;
+    max-width: calc(100vw - 32px);
+
+    background: #323238;
+    color: white;
+    border-radius: 12px;
+    font-size: 0.9375rem;
+    font-weight: 500;
+
+    box-shadow:
+        0 4px 12px rgba(0, 0, 0, 0.2),
+        0 8px 24px rgba(0, 0, 0, 0.15);
+
+    opacity: 0;
+    transition:
+        transform 0.4s var(--spring-bounce),
+        opacity 0.3s ease;
+}
+
+.pwa-toast.visible {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+}
+
+.pwa-toast.success {
+    background: #30D158;
+}
+
+.pwa-toast.error {
+    background: #FF3B30;
+}
+
+.pwa-toast-action {
+    margin-left: auto;
+    padding: 4px 12px;
+    background: rgba(255, 255, 255, 0.2);
+    border: none;
+    border-radius: 6px;
+    color: white;
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+/* ===========================================
+   BOTTOM SHEET / MODAL
+   =========================================== */
+
+.pwa-sheet-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    z-index: var(--z-sheet);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+}
+
+.pwa-sheet-backdrop.visible {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.pwa-sheet {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: var(--z-sheet);
+
+    max-height: 90vh;
+    padding: 12px 16px calc(16px + var(--safe-area-bottom));
+
+    background: white;
+    border-radius: 16px 16px 0 0;
+
+    transform: translateY(100%);
+    transition: transform 0.4s var(--spring-smooth);
+
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-sheet {
+        background: #2c2c34;
+    }
+}
+
+.pwa-sheet.visible {
+    transform: translateY(0);
+}
+
+/* Sheet drag handle */
+.pwa-sheet::before {
+    content: "";
+    display: block;
+    width: 36px;
+    height: 5px;
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 3px;
+    margin: 0 auto 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-sheet::before {
+        background: rgba(255, 255, 255, 0.2);
+    }
+}
+
+/* Sheet header */
+.pwa-sheet-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 16px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    margin-bottom: 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-sheet-header {
+        border-bottom-color: rgba(255, 255, 255, 0.1);
+    }
+}
+
+.pwa-sheet-title {
+    font-size: 1.125rem;
+    font-weight: 600;
+    margin: 0;
+}
+
+.pwa-sheet-close {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.05);
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 18px;
+    color: inherit;
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-sheet-close {
+        background: rgba(255, 255, 255, 0.1);
+    }
+}
+
+/* ===========================================
+   ACTION MENU (iOS-style)
+   =========================================== */
+
+.pwa-action-menu {
+    position: fixed;
+    bottom: var(--safe-area-bottom);
+    left: 8px;
+    right: 8px;
+    z-index: var(--z-modal);
+
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+
+    transform: translateY(calc(100% + 50px));
+    opacity: 0;
+    transition:
+        transform 0.4s var(--spring-smooth),
+        opacity 0.3s ease;
+}
+
+.pwa-action-menu.visible {
+    transform: translateY(-8px);
+    opacity: 1;
+}
+
+.pwa-action-group {
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-radius: 14px;
+    overflow: hidden;
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-action-group {
+        background: rgba(44, 44, 52, 0.95);
+    }
+}
+
+.pwa-action-item {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    border: none;
+    background: transparent;
+    font-size: 1.125rem;
+    color: #007AFF;
+    cursor: pointer;
+    width: 100%;
+    transition: background 0.15s ease;
+}
+
+.pwa-action-item:not(:last-child) {
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-action-item:not(:last-child) {
+        border-bottom-color: rgba(255, 255, 255, 0.1);
+    }
+}
+
+.pwa-action-item:active {
+    background: rgba(0, 0, 0, 0.05);
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-action-item:active {
+        background: rgba(255, 255, 255, 0.1);
+    }
+}
+
+.pwa-action-item.destructive {
+    color: #FF3B30;
+}
+
+.pwa-action-cancel {
+    font-weight: 600;
+}
+
+/* ===========================================
+   SEGMENTED CONTROL
+   =========================================== */
+
+.pwa-segment {
+    display: inline-flex;
+    background: rgba(0, 0, 0, 0.06);
+    border-radius: 8px;
+    padding: 2px;
+    gap: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-segment {
+        background: rgba(255, 255, 255, 0.1);
+    }
+}
+
+.pwa-segment-item {
+    padding: 8px 16px;
+    border: none;
+    background: transparent;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: inherit;
+    cursor: pointer;
+    transition:
+        background 0.2s ease,
+        box-shadow 0.2s ease;
+}
+
+.pwa-segment-item.active {
+    background: white;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-segment-item.active {
+        background: #3a3a42;
+    }
+}
+
+/* ===========================================
+   LOADING SKELETON
+   =========================================== */
+
+.pwa-skeleton {
+    background: linear-gradient(
+        90deg,
+        rgba(0, 0, 0, 0.06) 25%,
+        rgba(0, 0, 0, 0.1) 50%,
+        rgba(0, 0, 0, 0.06) 75%
+    );
+    background-size: 200% 100%;
+    animation: skeleton-shimmer 1.5s infinite;
+    border-radius: 4px;
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-skeleton {
+        background: linear-gradient(
+            90deg,
+            rgba(255, 255, 255, 0.06) 25%,
+            rgba(255, 255, 255, 0.1) 50%,
+            rgba(255, 255, 255, 0.06) 75%
+        );
+        background-size: 200% 100%;
+    }
+}
+
+@keyframes skeleton-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+.pwa-skeleton-text {
+    height: 1em;
+    margin-bottom: 0.5em;
+}
+
+.pwa-skeleton-text:last-child {
+    width: 60%;
+}
+
+.pwa-skeleton-avatar {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+}
+
+.pwa-skeleton-card {
+    height: 200px;
+    border-radius: 12px;
+}
+
+/* ===========================================
+   EMPTY STATE
+   =========================================== */
+
+.pwa-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 24px;
+    text-align: center;
+}
+
+.pwa-empty-icon {
+    width: 80px;
+    height: 80px;
+    margin-bottom: 24px;
+    background: rgba(0, 0, 0, 0.05);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-empty-icon {
+        background: rgba(255, 255, 255, 0.1);
+    }
+}
+
+.pwa-empty-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin: 0 0 8px;
+}
+
+.pwa-empty-description {
+    font-size: 0.9375rem;
+    color: rgba(0, 0, 0, 0.5);
+    margin: 0 0 24px;
+    max-width: 280px;
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-empty-description {
+        color: rgba(255, 255, 255, 0.5);
+    }
+}
+
+/* ===========================================
+   SEARCH BAR (in header)
+   =========================================== */
+
+.pwa-search {
+    flex: 1;
+    max-width: 400px;
+    margin: 0 16px;
+    position: relative;
+}
+
+.pwa-search input {
+    width: 100%;
+    height: 36px;
+    padding: 0 36px 0 12px;
+    background: rgba(0, 0, 0, 0.06);
+    border: none;
+    border-radius: 10px;
+    font-size: 0.9375rem;
+    color: inherit;
+    outline: none;
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-search input {
+        background: rgba(255, 255, 255, 0.1);
+    }
+}
+
+.pwa-search input:focus {
+    background: rgba(0, 0, 0, 0.08);
+    box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.2);
+}
+
+@media (prefers-color-scheme: dark) {
+    .pwa-search input:focus {
+        background: rgba(255, 255, 255, 0.15);
+    }
+}
+
+.pwa-search-icon {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 20px;
+    height: 20px;
+    opacity: 0.4;
+}
+
+/* ===========================================
+   BADGE / NOTIFICATION DOT
+   =========================================== */
+
+.pwa-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    background: #FF3B30;
+    color: white;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    border-radius: 9px;
+}
+
+.pwa-dot {
+    width: 8px;
+    height: 8px;
+    background: #FF3B30;
+    border-radius: 50%;
+}
+
+/* Position on tab icons */
+.pwa-bottom-nav a .pwa-badge,
+nav a .pwa-badge {
+    position: absolute;
+    top: 6px;
+    right: calc(50% - 20px);
+}
+
+/* ===========================================
+   SWIPE ACTIONS (revealed on swipe)
+   =========================================== */
+
+.pwa-swipe-actions {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+}
+
+.item.swiping .pwa-swipe-actions,
+article.swiping .pwa-swipe-actions,
+.entry.swiping .pwa-swipe-actions {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.pwa-swipe-action {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 80px;
+    color: white;
+    font-size: 0.8125rem;
+    font-weight: 500;
+}
+
+.pwa-swipe-action.archive {
+    background: #007AFF;
+}
+
+.pwa-swipe-action.delete {
+    background: #FF3B30;
+}
+
+.pwa-swipe-action.star {
+    background: #FF9500;
+}
+
+/* ===========================================
+   RESPONSIVE ADJUSTMENTS
+   =========================================== */
+
+/* Tablets and larger - side navigation option */
+@media screen and (min-width: 768px) {
+    body {
+        padding-bottom: 0;
+    }
+
+    .pwa-bottom-nav,
+    nav,
+    .nav {
+        /* Option: Move to sidebar on tablet */
+        /* Uncomment below for side nav */
+        /*
+        position: fixed;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        right: auto;
+        width: 72px;
+        height: 100vh;
+        flex-direction: column;
+        justify-content: flex-start;
+        padding-top: calc(var(--safe-area-top) + 16px);
+        border-top: none;
+        border-right: 1px solid rgba(0, 0, 0, 0.08);
+        */
+    }
+
+    .pwa-fab {
+        bottom: 24px;
+        right: 24px;
+    }
+}
+
+/* Desktop - larger touch targets not needed */
+@media screen and (min-width: 1024px) and (hover: hover) {
+    .item:active,
+    article:active,
+    .entry:active {
+        transform: none;
+        opacity: 1;
+    }
+}
+
+/* ===========================================
+   ACCESSIBILITY
+   =========================================== */
+
+/* Ensure focus is visible */
+.pwa-bottom-nav a:focus-visible,
+nav a:focus-visible,
+.pwa-fab:focus-visible,
+.pwa-action-item:focus-visible {
+    outline: 2px solid #007AFF;
+    outline-offset: 2px;
+}
+
+/* Skip link for screen readers */
+.pwa-skip-link {
+    position: absolute;
+    top: -100px;
+    left: 16px;
+    padding: 12px 24px;
+    background: #007AFF;
+    color: white;
+    border-radius: 8px;
+    font-weight: 600;
+    z-index: 9999;
+}
+
+.pwa-skip-link:focus {
+    top: calc(var(--safe-area-top) + 8px);
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.2s !important;
+    }
+
+    .pwa-pull-indicator::before {
+        animation: none;
+    }
+
+    .pwa-skeleton {
+        animation: none;
+    }
+}
+
+/* ===========================================
+   STANDALONE PWA DETECTION
+   =========================================== */
+
+/* Applied when running as installed PWA */
+@media (display-mode: standalone) {
+    /* Extra padding for iOS status bar */
+    body {
+        padding-top: calc(var(--pwa-header-height) + var(--safe-area-top) + 8px);
+    }
+
+    /* Hide browser-only elements */
+    .browser-only {
+        display: none !important;
+    }
+}
+
+/* Applied when running in browser */
+@media (display-mode: browser) {
+    /* Hide PWA-only elements */
+    .pwa-only {
+        display: none !important;
+    }
+}
+
+/* ===========================================
+   DARK MODE COLOR OVERRIDES
+   =========================================== */
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        color-scheme: dark;
+    }
+
+    /* Ensure text is readable */
+    .pwa-sheet-title,
+    .pwa-empty-title {
+        color: white;
+    }
+
+    /* Adjust action colors */
+    .pwa-action-item {
+        color: #0A84FF; /* iOS dark mode blue */
+    }
+
+    .pwa-action-item.destructive {
+        color: #FF453A; /* iOS dark mode red */
+    }
+}
