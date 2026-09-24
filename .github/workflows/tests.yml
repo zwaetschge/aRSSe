@@ -31,3 +31,11 @@ jobs:
         run: docker build intelligence
       - name: Check shell scripts
         run: shellcheck scripts/*.sh
+
+  integration:
+    # Full stack against a real Miniflux: API usage, permissions, health check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/integration-test.sh

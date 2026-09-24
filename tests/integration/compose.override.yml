@@ -1,0 +1,25 @@
+# Test-only additions: a static feed server, private-network fetching and
+# names that do not collide with a running production stack
+services:
+  miniflux:
+    container_name: arsse-it-miniflux
+    environment:
+      - FETCHER_ALLOW_PRIVATE_NETWORKS=1
+      - POLLING_FREQUENCY=60
+  feeds:
+    image: python:3.11-slim
+    command: ["python", "-m", "http.server", "8000", "--directory", "/feeds"]
+    volumes:
+      - ${FEEDS_DIR}:/feeds:ro
+    networks:
+      - arsse-network
+  intelligence:
+    container_name: arsse-it-intelligence
+    environment:
+      - CLUSTERING_INTERVAL=1
+  db:
+    container_name: arsse-it-db
+
+networks:
+  arsse-network:
+    name: arsse-it-network
