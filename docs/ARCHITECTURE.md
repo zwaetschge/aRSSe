@@ -135,11 +135,22 @@ größere Cluster wählen zuerst. Nur wirklich neue Themen bekommen eine neue ID
 
 **Ranking:** `Anzahl Quellen / (1 + Alter des neuesten Artikels in Stunden / 12)`
 
+#### Container-Start
+Docker legt ein fehlendes Bind-Mount-Verzeichnis als root an. Deshalb startet der
+Container als root: `entrypoint.py` legt `/app/data` an, übergibt das Verzeichnis und
+die Dateien darin (`arsse.db*`, Log) an `PUID:PGID` – nur wenn der Besitzer abweicht –,
+löscht die Zusatzgruppen, wechselt Gruppe und Benutzer und startet dann den Dienst per
+`exec`. Läuft der Container bereits ohne Root-Rechte (ältere Compose-Dateien mit `user:`),
+startet der Entrypoint den Dienst unverändert. Der Rechtewechsel ist in Python
+geschrieben, weil `setpriv`/`gosu` im Basis-Image nicht garantiert sind.
+
 ### 4. Presentation Layer
 
 **Top Stories (Port 8081):** Server-seitig gerenderte Seiten ohne JavaScript und ohne
 externe Ressourcen – funktioniert auf E-Ink-Readern ebenso wie im Desktop-Browser,
-Dark Mode über `prefers-color-scheme`.
+Dark Mode über `prefers-color-scheme`. Artikel-Links führen nach Miniflux (`BASE_URL`).
+Zeigt `BASE_URL` auf eine Loopback-Adresse, setzt die Oberfläche die Links pro Anfrage
+aus dem aufgerufenen Host und `MINIFLUX_PORT` zusammen, da der Reader nie der Server ist.
 
 **Miniflux-Themes:** `css/eink-theme.css` und `css/color-theme.css` als
 benutzerdefiniertes CSS. Miniflux liefert Manifest und Service Worker selbst mit,

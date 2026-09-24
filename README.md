@@ -34,14 +34,23 @@ cd aRSSe
 
 ```bash
 cp .env.example .env
+chmod 600 .env
 # Bearbeiten Sie .env mit Ihren Einstellungen
 ```
+
+Tragen Sie für `POSTGRES_PASSWORD` und `ADMIN_PASSWORD` zwei unterschiedliche Passwörter ein.
+
+### 2b. BASE_URL setzen
+
+Setzen Sie `BASE_URL` in `.env` auf die Adresse, unter der Ihre Geräte Miniflux erreichen, z.B. `BASE_URL=http://192.168.1.10:8080` oder `https://news.meinedomain.de`. Die Links der Top Stories führen dorthin – `localhost` wäre auf dem E-Ink-Reader das Gerät selbst. Bleibt `BASE_URL` auf `localhost`, bauen die Top Stories ihre Links notfalls aus der aufgerufenen Adresse und `MINIFLUX_PORT`.
 
 ### 3. Stack starten
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
+
+Das Datenverzeichnis des Intelligence Layers (`${DATA_PATH}/intelligence`) muss nicht vorab angelegt werden: Der Container startet als root, übergibt es an `PUID:PGID` (Standard 1000:1000, Unraid 99:100) und läuft danach ohne Root-Rechte.
 
 ### 4. Miniflux aufrufen
 
@@ -51,7 +60,7 @@ docker-compose up -d
 
 Erzeugen Sie in Miniflux unter *Einstellungen > API-Schlüssel* einen Key, tragen Sie ihn als `MINIFLUX_API_KEY` in `.env` ein und starten Sie `docker compose up -d intelligence`. Die Top Stories sind dann unter `http://<unraid-ip>:8081` erreichbar.
 
-Alternativ erledigt `scripts/setup.sh` die Schritte 2–4 inklusive Passwortgenerierung und Verzeichnisrechten.
+Alternativ erledigt `scripts/setup.sh` die Schritte 2–4: Es erzeugt `.env` (Rechte 600) mit zwei zufälligen Passwörtern, setzt `BASE_URL` auf die erkannte IP-Adresse des Servers, legt die Datenverzeichnisse an und startet auf Nachfrage Datenbank und Miniflux. `--yes` startet ohne Rückfrage, `--no-start` gar nicht (Standard ohne Terminal, z.B. in Unraid User Scripts). Ein erneuter Aufruf überschreibt eine bestehende `.env` nicht, sondern ergänzt nur Einträge, die in neueren Versionen von `.env.example` hinzugekommen sind, und warnt vor veralteten. Fehlt `.env`, obwohl die Datenbank schon existiert, bricht das Skript ab – stellen Sie dann `.env` aus dem Backup wieder her.
 
 ## Komponenten
 
@@ -93,7 +102,7 @@ Die Miniflux-API kann keine Tags oder eigenen Metadaten schreiben – deshalb br
 | `/api/stories` | Dieselben Daten als JSON |
 | `/healthz` | `200`, solange der letzte erfolgreiche Lauf weniger als drei Intervalle zurückliegt |
 
-Links führen in Miniflux (`BASE_URL`), damit Gelesen-Status und Volltext erhalten bleiben.
+Links führen in Miniflux (`BASE_URL`), damit Gelesen-Status und Volltext erhalten bleiben. Zeigt `BASE_URL` auf `localhost`, verwenden die Links stattdessen die Adresse, unter der die Top Stories aufgerufen wurden, mit `MINIFLUX_PORT` (beim Start erscheint dazu eine Warnung im Log).
 
 **Konfiguration:**
 
@@ -144,6 +153,7 @@ aRSSe/
 ├── intelligence/
 │   ├── Dockerfile          # Python-Container
 │   ├── requirements.txt    # Python-Abhängigkeiten
+│   ├── entrypoint.py       # Container-Start: Datenrechte setzen, Root-Rechte abgeben
 │   ├── news_clustering.py  # Clustering-Logik und Einstiegspunkt
 │   ├── evaluate.py         # Clustering-Schwelle an eigenen Feeds kalibrieren
 │   ├── store.py            # SQLite-Story-Datenbank
@@ -159,6 +169,7 @@ aRSSe/
 │   └── miniflux.xml        # Unraid CA Template
 ├── scripts/
 │   ├── setup.sh            # Initialisierungsskript
+│   ├── test-setup.sh       # Test für setup.sh (ohne Docker)
 │   └── integration-test.sh # Stack-Test gegen echtes Miniflux
 └── tests/integration/      # Feeds und Compose-Override für den Stack-Test
 ```
@@ -219,7 +230,8 @@ server {
 2. Prüfen Sie die Logs: `docker logs arsse-intelligence`
 3. Stories entstehen erst, wenn mehrere Feeds über dasselbe Thema berichten – abonnieren Sie mehrere überlappende Quellen
 4. Zu wenige oder zu große Stories: `threshold` mit `evaluate.py` kalibrieren (höher = größere, aber unschärfere Stories)
-5. `Cannot open story database`: Das Datenverzeichnis gehört nicht `PUID:PGID` – `chown` auf `${DATA_PATH}/intelligence` ausführen
+5. `Cannot open story database`: Der Container konnte `${DATA_PATH}/intelligence` nicht an `PUID:PGID` übergeben (z.B. NFS-Freigabe mit `root_squash`, oder eine ältere `docker-compose.yml` mit `user:`) – dann `chown PUID:PGID` auf das Verzeichnis selbst ausführen
+6. Alle Links der Top Stories zeigen auf `localhost` oder die falsche Adresse: `BASE_URL` in `.env` setzen und `docker compose up -d` ausführen
 
 ### E-Ink-Darstellung fehlerhaft
 
@@ -247,7 +259,11 @@ Integrationstest mit echtem Miniflux (braucht Docker, kollidiert nicht mit einem
 
 ```bash
 scripts/integration-test.sh
+# wie Unraid: Daten für 99:100, Verzeichnis legt Docker an
+IT_PUID=99 IT_PGID=100 IT_PRECREATE_DATA=0 scripts/integration-test.sh
 ```
+
+`scripts/test-setup.sh` prüft `setup.sh` mit einem Docker-Stub (ohne Docker).
 
 ## Lizenz
 

@@ -11,6 +11,10 @@ miniflux:
   # URL, unter der dein Browser Miniflux erreicht (für Links in Top Stories).
   # Wird von MINIFLUX_PUBLIC_URL bzw. BASE_URL überschrieben.
   public_url: "http://localhost:8080"
+  # Port von Miniflux auf dem Server (MINIFLUX_PORT). Zeigt public_url auf
+  # localhost, bauen die Top Stories ihre Links aus der aufgerufenen Adresse
+  # und diesem Port – localhost wäre auf dem E-Ink-Reader das Gerät selbst.
+  public_port: 8080
 
 # Clustering-Konfiguration (Average Linkage)
 clustering:

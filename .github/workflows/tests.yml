@@ -32,10 +32,45 @@ jobs:
       - name: Check shell scripts
         run: shellcheck scripts/*.sh
 
+  setup-script:
+    # setup.sh with a stubbed docker: passwords, .env mode, BASE_URL, reruns
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/test-setup.sh
+
   integration:
     # Full stack against a real Miniflux: API usage, permissions, health check
+    name: integration (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Data directory prepared by the user, entrypoint drops root
+          - name: runner-uid
+            puid: ""
+            pgid: ""
+            precreate: "1"
+            legacy_user: "0"
+          # README quickstart on Unraid: Docker creates the directory as root
+          - name: unraid-99-100
+            puid: "99"
+            pgid: "100"
+            precreate: "0"
+            legacy_user: "0"
+          # Older compose files with user: PUID:PGID
+          - name: legacy-user
+            puid: ""
+            pgid: ""
+            precreate: "1"
+            legacy_user: "1"
+    env:
+      IT_PUID: ${{ matrix.puid }}
+      IT_PGID: ${{ matrix.pgid }}
+      IT_PRECREATE_DATA: ${{ matrix.precreate }}
+      IT_LEGACY_USER: ${{ matrix.legacy_user }}
     steps:
       - uses: actions/checkout@v4
       - run: scripts/integration-test.sh

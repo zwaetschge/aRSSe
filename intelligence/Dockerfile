@@ -20,9 +20,11 @@ RUN python -c "import nltk, sys; sys.exit(0 if nltk.download('stopwords', downlo
 # Application code
 COPY . .
 
-# Non-root user for security
-RUN useradd -m -u 1000 arsse && mkdir -p /app/data && chown -R arsse:arsse /app
-USER arsse
+# The entrypoint starts as root, hands /app/data to PUID:PGID (default
+# 1000:1000 = arsse) and drops privileges before starting the service;
+# the code stays root-owned but readable for any PUID
+RUN useradd -m -u 1000 arsse && mkdir -p /app/data && chown arsse:arsse /app/data \
+    && chmod -R a+rX /app
 
 EXPOSE 8081
 
@@ -30,4 +32,5 @@ EXPOSE 8081
 HEALTHCHECK --interval=60s --timeout=10s --start-period=180s --retries=3 \
     CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.getenv('WEB_PORT', '8081'), timeout=5)"
 
+ENTRYPOINT ["python", "/app/entrypoint.py"]
 CMD ["python", "news_clustering.py"]

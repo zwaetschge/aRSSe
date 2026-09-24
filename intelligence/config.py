@@ -89,6 +89,8 @@ class Config:
     miniflux_api_key: str = ""
     # URL under which the browser reaches Miniflux (used for links in the UI)
     miniflux_public_url: str = "http://localhost:8080"
+    # Host port of Miniflux; used for links when public_url is a loopback address
+    miniflux_public_port: int = 8080
     clustering: ClusteringConfig = field(default_factory=ClusteringConfig)
     deduplication: DeduplicationConfig = field(default_factory=DeduplicationConfig)
     scheduling: SchedulingConfig = field(default_factory=SchedulingConfig)
@@ -163,6 +165,7 @@ def _apply_yaml_config(config: Config, yaml_config: dict) -> None:
     if miniflux := yaml_config.get('miniflux'):
         config.miniflux_url = miniflux.get('url', config.miniflux_url)
         config.miniflux_public_url = miniflux.get('public_url', config.miniflux_public_url)
+        config.miniflux_public_port = int(miniflux.get('public_port', config.miniflux_public_port))
 
 
 def _env(name: str) -> Optional[str]:
@@ -180,6 +183,8 @@ def _apply_env_config(config: Config) -> None:
         config.miniflux_api_key = api_key
     if public_url := _env('MINIFLUX_PUBLIC_URL'):
         config.miniflux_public_url = public_url
+    if public_port := _env('MINIFLUX_PORT'):
+        config.miniflux_public_port = int(public_port)
 
     # Clustering
     if threshold := _env('CLUSTERING_THRESHOLD'):
@@ -226,6 +231,8 @@ def _validate(config: Config) -> None:
         raise ValueError("deduplication.threshold must be in (0, 1]")
     if not 0.0 < config.clustering.threshold < 1.0:
         raise ValueError("clustering.threshold must be in (0, 1)")
+    if not 0 < config.miniflux_public_port < 65536:
+        raise ValueError("miniflux.public_port must be a TCP port (1-65535)")
     if config.web.min_sources < 1:
         raise ValueError("web.min_sources must be at least 1")
     if config.scheduling.interval_minutes < 1:

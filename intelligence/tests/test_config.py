@@ -61,3 +61,17 @@ def test_legacy_dbscan_settings_are_ignored(tmp_path, monkeypatch):
     cfg = load_config(write_yaml(tmp_path, 'clustering:\n  eps: 0.4\n  min_samples: 3\n'))
     assert cfg.clustering.threshold == 0.75
     assert not hasattr(cfg.clustering, 'eps')
+
+
+def test_miniflux_public_port(tmp_path, monkeypatch):
+    monkeypatch.delenv('MINIFLUX_PORT', raising=False)
+    assert load_config(None).miniflux_public_port == 8080
+    path = write_yaml(tmp_path, 'miniflux:\n  public_port: 8090\n')
+    assert load_config(path).miniflux_public_port == 8090
+
+    monkeypatch.setenv('MINIFLUX_PORT', '18080')
+    assert load_config(path).miniflux_public_port == 18080
+
+    monkeypatch.setenv('MINIFLUX_PORT', '0')
+    with pytest.raises(ValueError):
+        load_config(path)

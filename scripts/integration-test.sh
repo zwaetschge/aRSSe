@@ -6,6 +6,13 @@
 # synthetische Feeds und prüft, dass Stories entstehen und Duplikate in
 # Miniflux als gelesen markiert werden. Kollidiert nicht mit einem
 # laufenden Produktions-Stack (eigene Namen, Ports und Datenverzeichnisse).
+#
+# Varianten (Umgebungsvariablen):
+#   IT_PUID/IT_PGID    Besitzer der Intelligence-Daten (Standard: aktueller Benutzer)
+#   IT_PRECREATE_DATA  1 = data/intelligence vorab anlegen (Standard),
+#                      0 = Docker legt es als root an, der Container übernimmt es
+#   IT_LEGACY_USER     1 = Intelligence mit "user: PUID:PGID" starten wie ältere
+#                      Compose-Dateien (braucht IT_PRECREATE_DATA=1)
 
 set -euo pipefail
 
@@ -15,11 +22,18 @@ MF_PORT="${MF_PORT:-18080}"
 IT_PORT="${IT_PORT:-18081}"
 ADMIN_PASSWORD="it-$(date +%s)-secret"
 API="http://localhost:$MF_PORT/v1"
+PUID="${IT_PUID:-$(id -u)}"
+PGID="${IT_PGID:-$(id -g)}"
+PRECREATE_DATA="${IT_PRECREATE_DATA:-1}"
+LEGACY_USER="${IT_LEGACY_USER:-0}"
+
+COMPOSE_FILES=(-f "$ROOT/docker-compose.yml" -f "$ROOT/tests/integration/compose.override.yml")
+if [ "$LEGACY_USER" = 1 ]; then
+    COMPOSE_FILES+=(-f "$WORK/legacy-user.yml")
+fi
 
 compose() {
-    docker compose -p arsse-it --env-file "$WORK/.env" \
-        -f "$ROOT/docker-compose.yml" \
-        -f "$ROOT/tests/integration/compose.override.yml" "$@"
+    docker compose -p arsse-it --env-file "$WORK/.env" "${COMPOSE_FILES[@]}" "$@"
 }
 
 cleanup() {
@@ -44,9 +58,16 @@ json() {
 
 step() { echo "==> $*"; }
 
-step "Preparing feeds and environment in $WORK"
+step "Preparing feeds and environment in $WORK (PUID=$PUID PGID=$PGID," \
+    "pre-created data dir: $PRECREATE_DATA, legacy user: $LEGACY_USER)"
 python3 "$ROOT/tests/integration/make_feeds.py" "$WORK/feeds"
-mkdir -p "$WORK/data/intelligence"
+if [ "$PRECREATE_DATA" = 1 ]; then
+    mkdir -p "$WORK/data/intelligence"
+fi
+if [ "$LEGACY_USER" = 1 ]; then
+    # Older compose files ran the container unprivileged from the start
+    printf 'services:\n  intelligence:\n    user: "%s:%s"\n' "$PUID" "$PGID" > "$WORK/legacy-user.yml"
+fi
 cat > "$WORK/.env" <<ENV
 POSTGRES_PASSWORD=it-db-secret
 ADMIN_USERNAME=admin
@@ -55,8 +76,8 @@ MINIFLUX_PORT=$MF_PORT
 INTELLIGENCE_PORT=$IT_PORT
 BASE_URL=http://localhost:$MF_PORT
 DATA_PATH=$WORK/data
-PUID=$(id -u)
-PGID=$(id -g)
+PUID=$PUID
+PGID=$PGID
 FEEDS_DIR=$WORK/feeds
 MINIFLUX_API_KEY=
 ENV
@@ -107,6 +128,18 @@ READ=$(curl -fsS -H "X-Auth-Token: $API_KEY" "$API/entries?status=read" | json '
 echo "    $READ entries marked read in Miniflux"
 [ "$READ" -eq 1 ] || { echo "Expected exactly 1 duplicate marked read, got $READ"; exit 1; }
 
-curl -fsS "http://localhost:$IT_PORT/" | grep -q "Bundestag beschließt Haushalt"
+HTML=$(curl -fsS "http://localhost:$IT_PORT/")
+grep -q "Bundestag beschließt Haushalt" <<< "$HTML"
+
+# BASE_URL is localhost here: links must follow the host the browser used
+grep -q "href=\"http://localhost:$MF_PORT/feed/" <<< "$HTML" \
+    || { echo "Links do not point to Miniflux on port $MF_PORT"; exit 1; }
+HTML=$(curl -fsS -H "Host: 192.0.2.10:$IT_PORT" "http://localhost:$IT_PORT/")
+grep -q "href=\"http://192.0.2.10:$MF_PORT/feed/" <<< "$HTML" \
+    || { echo "Links do not follow the request host"; exit 1; }
+
+OWNER=$(stat -c %u:%g "$WORK/data/intelligence/arsse.db")
+echo "    arsse.db owned by $OWNER"
+[ "$OWNER" = "$PUID:$PGID" ] || { echo "Expected arsse.db owned by $PUID:$PGID, got $OWNER"; exit 1; }
 
 step "Integration test passed"
