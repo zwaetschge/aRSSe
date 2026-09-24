@@ -80,8 +80,7 @@ storage:
 
 # Top-Stories-Weboberfläche
 web:
-  host: "0.0.0.0"
-  port: 8081
+  # Der Port ist fest 8081 im Container; extern über INTELLIGENCE_PORT in .env
   # Maximale Anzahl angezeigter Stories
   max_stories: 50
   # Weitere Artikel pro Story auf der Startseite

@@ -40,6 +40,8 @@ logger = logging.getLogger('arsse-intelligence')
 SNIPPET_LENGTH = 280
 # Long articles add little signal but cost a lot of vectorization time
 MAX_CONTENT_CHARS = 5000
+# First retry delay after a failed cycle; doubles up to the normal interval
+MIN_RETRY_SECONDS = 10
 
 _TOKEN_RE = re.compile(r'\b\w\w+\b')
 
@@ -162,7 +164,10 @@ class NewsClusterer:
 
         elapsed = time.time() - start_time
         stats['duration_seconds'] = round(elapsed, 2)
-        self.store.set_meta('last_stats', stats)
+        try:
+            self.store.set_meta('last_stats', stats)
+        except Exception as e:  # e.g. disk full; must not kill the scheduler
+            logger.error("Failed to store run statistics: %s", e)
         logger.info("Clustering cycle completed in %.2f seconds: %s", elapsed, stats)
         return stats
 
@@ -381,23 +386,28 @@ def setup_logging(config: Config) -> None:
 
 def run_scheduler(config: Config, store: StoryStore, stop: threading.Event,
                   make_clusterer: Callable[[], NewsClusterer]) -> None:
-    """Run clustering cycles until stopped, retrying failed startups."""
+    """Run clustering cycles until stopped; retry failures with backoff."""
     clusterer = None
-    retry_delay = 10
     interval = config.scheduling.interval_minutes * 60
+    retry_delay = MIN_RETRY_SECONDS
 
     while not stop.is_set():
-        if clusterer is None:
-            try:
+        try:
+            if clusterer is None:
                 clusterer = make_clusterer()
-            except Exception as e:
-                logger.error("Failed to initialize clusterer: %s (retry in %ds)", e, retry_delay)
-                stop.wait(retry_delay)
-                retry_delay = min(retry_delay * 2, 600)
-                continue
+            failed = clusterer.run_clustering_cycle()['errors'] > 0
+        except Exception as e:
+            logger.exception("Clustering cycle crashed: %s", e)
+            failed = True
 
-        clusterer.run_clustering_cycle()
-        stop.wait(interval)
+        if failed:
+            delay = min(retry_delay, interval)
+            logger.warning("Clustering failed, retrying in %ds", delay)
+            retry_delay = min(retry_delay * 2, interval)
+        else:
+            delay = interval
+            retry_delay = MIN_RETRY_SECONDS
+        stop.wait(delay)
 
 
 def main():

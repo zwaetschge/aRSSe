@@ -136,6 +136,13 @@ def _apply_section(target, values: Optional[dict]) -> None:
 
 def _apply_yaml_config(config: Config, yaml_config: dict) -> None:
     """Apply YAML configuration to Config object."""
+    web = dict(yaml_config.get('web') or {})
+    for key in ('host', 'port'):
+        if web.pop(key, None) is not None:
+            logger.warning("web.%s is ignored in config.yaml; the container always "
+                           "listens on 8081 (change INTELLIGENCE_PORT in .env)", key)
+    yaml_config = {**yaml_config, 'web': web}
+
     for section in ('clustering', 'deduplication', 'scheduling',
                     'storage', 'web', 'logging'):
         _apply_section(getattr(config, section), yaml_config.get(section))
