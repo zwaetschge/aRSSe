@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}{{ story.headline.title }}{% endblock %}
+{% block title %}{{ story.headline.title or '(ohne Titel)' }}{% endblock %}
 {% block content %}
 <article class="story">
-  <h2><a href="{{ entry_link(story.headline) }}">{{ story.headline.title }}</a></h2>
+  <h2><a href="{{ entry_link(story.headline) }}">{{ story.headline.title or '(ohne Titel)' }}</a></h2>
   <div class="meta">
     {{ story.source_count }} Quellen, {{ story.article_count }} Artikel
     · zuerst gesehen {{ story.first_seen | ago }}
@@ -13,7 +13,7 @@
     {% for a in story.articles %}
     <li class="{{ 'duplicate' if a.is_duplicate }}">
       <span class="source">{{ a.feed_title }}</span>:
-      <a href="{{ entry_link(a) }}">{{ a.title }}</a>
+      <a href="{{ entry_link(a) }}">{{ a.title or '(ohne Titel)' }}</a>
       <span class="meta">{{ a.published_at | ago }}</span>
       {% if a.is_duplicate %}<span class="label">Duplikat</span>{% endif %}
       {% if safe_url(a.url) %}· <a class="meta" href="{{ safe_url(a.url) }}" rel="noopener noreferrer">Original</a>{% endif %}

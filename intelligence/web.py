@@ -53,7 +53,7 @@ def create_app(config: Config, store: StoryStore) -> Flask:
 
     @app.get('/')
     def index():
-        stories = store.top_stories(max_age_hours, config.web.max_stories)
+        stories = store.top_stories(max_age_hours, config.web.max_stories, config.web.min_sources)
         return render_template(
             'index.html',
             stories=stories,
@@ -70,7 +70,7 @@ def create_app(config: Config, store: StoryStore) -> Flask:
 
     @app.get('/api/stories')
     def api_stories():
-        return jsonify(store.top_stories(max_age_hours, config.web.max_stories))
+        return jsonify(store.top_stories(max_age_hours, config.web.max_stories, config.web.min_sources))
 
     @app.get('/healthz')
     def healthz():

@@ -10,7 +10,7 @@ Das System besteht aus fünf logischen Schichten:
 |---------|------------|-------------|----------|
 | Ingestion | Miniflux | Go, Docker | RSS/Atom-Abruf, Parsing, Full-Content Scraping |
 | Storage | PostgreSQL | SQL | Persistente Speicherung von Artikeln und Metadaten |
-| Intelligence | Python-Service | Python, Scikit-Learn, SQLite | TF-IDF, DBSCAN Clustering, Deduplizierung |
+| Intelligence | Python-Service | Python, Scikit-Learn, SQLite | TF-IDF, Average-Linkage-Clustering, Deduplizierung |
 | Presentation | Top Stories + Miniflux-CSS | Flask, HTML5, CSS3 | Story-Ansicht und E-Ink-optimierte Themes |
 | Access | Nginx Proxy | Docker, Let's Encrypt | SSL-Terminierung, externer Zugriff |
 
@@ -80,7 +80,7 @@ Der Python-Service läuft zyklisch (Standard: alle 30 Minuten) und führt folgen
 1. **Extraction**: Abruf aller Artikel der letzten 24 Stunden via Miniflux API (gelesen und ungelesen, paginiert)
 2. **Preprocessing**: HTML entfernen, Normalisierung, Stopwords, Stemming (Snowball)
 3. **Vectorization**: TF-IDF über Uni- und Bigramme
-4. **Clustering**: DBSCAN gruppiert Artikel zum selben Ereignis zu einer *Story*
+4. **Clustering**: Agglomeratives Clustering (Average Linkage) gruppiert Artikel zum selben Ereignis zu einer *Story*
 5. **Deduplication**: Near-Duplicates (z.B. identische Agenturmeldungen) innerhalb einer Story
 6. **Persistence**: Stories landen in einer lokalen SQLite-Datenbank (`data/intelligence/arsse.db`) mit über Läufe hinweg stabilen IDs; Duplikate werden optional in Miniflux als gelesen markiert
 
@@ -88,7 +88,7 @@ Die Miniflux-API kann keine Tags oder eigenen Metadaten schreiben – deshalb br
 
 | Pfad | Inhalt |
 |------|--------|
-| `/` | Top Stories, gerankt nach Anzahl der Quellen und Aktualität |
+| `/` | Top Stories aus mindestens zwei Feeds, gerankt nach Anzahl der Quellen und Aktualität |
 | `/story/<id>` | Alle Artikel einer Story |
 | `/api/stories` | Dieselben Daten als JSON |
 | `/healthz` | `200`, solange der letzte erfolgreiche Lauf weniger als drei Intervalle zurückliegt |
@@ -100,8 +100,7 @@ Links führen in Miniflux (`BASE_URL`), damit Gelesen-Status und Volltext erhalt
 ```yaml
 # intelligence/config.yaml
 clustering:
-  eps: 0.4                       # DBSCAN Epsilon (Kosinus-Distanz)
-  min_samples: 2                 # Minimum Artikel pro Story
+  threshold: 0.75                # max. durchschnittliche Kosinus-Distanz einer Story
   stemming: true
 
 deduplication:
@@ -112,7 +111,17 @@ scheduling:
   interval_minutes: 30           # Ausführungsintervall
 ```
 
-Umgebungsvariablen aus `.env` (z.B. `CLUSTERING_EPS`) überschreiben `config.yaml`; auskommentierte bzw. leere Variablen tun das nicht.
+Umgebungsvariablen aus `.env` (z.B. `CLUSTERING_THRESHOLD`) überschreiben `config.yaml`; auskommentierte bzw. leere Variablen tun das nicht.
+
+**Schwelle kalibrieren:** Der Standardwert 0.75 ist an ~500 echten Artikeln aus 13 deutschen Nachrichtenfeeds gemessen (Kurztexte aus RSS, kein Volltext). Mit anderen Feeds oder aktiviertem Volltext-Crawler lohnt ein Vergleich – das Werkzeug liest nur und schreibt nichts:
+
+```bash
+docker compose exec intelligence python evaluate.py 0.65 0.7 0.75 0.8
+```
+
+Es zeigt je Schwelle die Anzahl der Stories sowie die größten und einige zufällige Stories. Große Stories mit gemischten Themen = Schwelle zu hoch; viele zusammengehörige Artikel außerhalb von Stories = zu niedrig.
+
+**Lokale Feeds:** Miniflux ruft seit 2.3 standardmäßig keine Feeds aus privaten Netzen ab. Für Feeds im Heimnetz `FETCHER_ALLOW_PRIVATE_NETWORKS=1` beim Miniflux-Container setzen.
 
 ### E-Ink Optimierung
 
@@ -136,6 +145,7 @@ aRSSe/
 │   ├── Dockerfile          # Python-Container
 │   ├── requirements.txt    # Python-Abhängigkeiten
 │   ├── news_clustering.py  # Clustering-Logik und Einstiegspunkt
+│   ├── evaluate.py         # Clustering-Schwelle an eigenen Feeds kalibrieren
 │   ├── store.py            # SQLite-Story-Datenbank
 │   ├── web.py              # Top-Stories-Oberfläche
 │   ├── templates/          # HTML-Templates
@@ -147,8 +157,10 @@ aRSSe/
 │   └── color-theme.css     # Farb-Theme für Miniflux
 ├── unraid/
 │   └── miniflux.xml        # Unraid CA Template
-└── scripts/
-    └── setup.sh            # Initialisierungsskript
+├── scripts/
+│   ├── setup.sh            # Initialisierungsskript
+│   └── integration-test.sh # Stack-Test gegen echtes Miniflux
+└── tests/integration/      # Feeds und Compose-Override für den Stack-Test
 ```
 
 ## E-Ink Integration
@@ -206,7 +218,7 @@ server {
 1. Prüfen Sie den Status: `curl http://<unraid-ip>:8081/healthz` (enthält die Statistik des letzten Laufs)
 2. Prüfen Sie die Logs: `docker logs arsse-intelligence`
 3. Stories entstehen erst, wenn mehrere Feeds über dasselbe Thema berichten – abonnieren Sie mehrere überlappende Quellen
-4. Zu wenige oder zu große Stories: `eps` anpassen (höher = größere, aber unschärfere Stories)
+4. Zu wenige oder zu große Stories: `threshold` mit `evaluate.py` kalibrieren (höher = größere, aber unschärfere Stories)
 5. `Cannot open story database`: Das Datenverzeichnis gehört nicht `PUID:PGID` – `chown` auf `${DATA_PATH}/intelligence` ausführen
 
 ### E-Ink-Darstellung fehlerhaft
@@ -229,6 +241,12 @@ python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
 python -c "import nltk; nltk.download('stopwords')"
 pytest
+```
+
+Integrationstest mit echtem Miniflux (braucht Docker, kollidiert nicht mit einem laufenden Stack):
+
+```bash
+scripts/integration-test.sh
 ```
 
 ## Lizenz

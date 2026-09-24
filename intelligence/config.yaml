@@ -12,17 +12,13 @@ miniflux:
   # Wird von MINIFLUX_PUBLIC_URL bzw. BASE_URL überschrieben.
   public_url: "http://localhost:8080"
 
-# Clustering-Konfiguration (DBSCAN)
+# Clustering-Konfiguration (Average Linkage)
 clustering:
-  # Epsilon: Maximale Kosinus-Distanz zwischen zwei Artikeln im selben Cluster
-  # Niedrigere Werte = striktere Gruppierung (0.3-0.6 empfohlen)
-  eps: 0.4
-
-  # Minimum Anzahl Artikel für einen Cluster
-  min_samples: 2
-
-  # Metrik für Ähnlichkeitsberechnung
-  metric: "cosine"
+  # Maximale durchschnittliche Kosinus-Distanz der Artikel einer Story.
+  # Niedriger = kleinere, schärfere Stories; höher = mehr Artikel in Stories,
+  # aber ab ca. 0.8 landen unverwandte Themen zusammen.
+  # 0.75 ist an ~500 echten Artikeln aus 13 deutschen Nachrichtenfeeds kalibriert.
+  threshold: 0.75
 
   # Maximale Features für TF-IDF Vektorisierung
   max_features: 5000
@@ -85,6 +81,9 @@ web:
   max_stories: 50
   # Weitere Artikel pro Story auf der Startseite
   articles_per_story: 6
+  # Nur Stories aus mindestens so vielen Feeds anzeigen
+  # (blendet Werbeblöcke und Serien eines einzelnen Feeds aus)
+  min_sources: 2
 
 # Logging
 logging:

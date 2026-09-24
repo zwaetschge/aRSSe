@@ -1,4 +1,4 @@
-from conftest import FakeClient, sample_entries
+from conftest import FakeClient, make_entry, sample_entries
 from news_clustering import NewsClusterer
 from web import create_app
 
@@ -55,3 +55,19 @@ def test_api_stories(config, store):
     http = client_for(config, store)
     data = http.get('/api/stories').get_json()
     assert {len(s['articles']) for s in data} == {2, 3}
+
+
+def test_single_source_stories_are_hidden(config, store):
+    ads = [make_entry(20 + i, 4, f'Anzeige: Notebook {i} zum Tiefstpreis bei Amazon',
+                      'Jetzt zum Tiefstpreis bei Amazon sichern, Angebot nur heute gültig.')
+           for i in range(3)]
+    http = client_for(config, store, sample_entries() + ads)
+
+    assert any(s['source_count'] == 1 for s in store.top_stories(24, 50))
+    html = http.get('/').get_data(as_text=True)
+    assert 'Tiefstpreis' not in html
+    assert 'Bundestag' in html
+
+    config.web.min_sources = 1
+    html = create_app(config, store).test_client().get('/').get_data(as_text=True)
+    assert 'Tiefstpreis' in html

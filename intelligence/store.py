@@ -176,7 +176,7 @@ class StoryStore:
             row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return json.loads(row['value']) if row else default
 
-    def top_stories(self, max_age_hours: int, limit: int) -> list:
+    def top_stories(self, max_age_hours: int, limit: int, min_sources: int = 1) -> list:
         """
         Return ranked stories with their articles.
 
@@ -196,6 +196,7 @@ class StoryStore:
             age_hours = (now - newest).total_seconds() / 3600 if newest else max_age_hours
             story['score'] = story['source_count'] / (1 + max(age_hours, 0) / 12)
 
+        stories = [s for s in stories if s['source_count'] >= min_sources]
         stories.sort(key=lambda s: s['score'], reverse=True)
         return stories[:limit]
 

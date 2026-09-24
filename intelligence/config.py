@@ -23,14 +23,15 @@ CANONICAL_STRATEGIES = ('longest', 'source_priority', 'newest')
 
 # Values accepted by older versions of config.yaml
 _LEGACY_DUPLICATE_ACTIONS = {'tag': 'none', 'hide': 'mark_read'}
+# DBSCAN settings from before the switch to average-linkage clustering
+_LEGACY_CLUSTERING_KEYS = ('eps', 'min_samples', 'metric')
 
 
 @dataclass
 class ClusteringConfig:
-    """Configuration for DBSCAN clustering."""
-    eps: float = 0.4
-    min_samples: int = 2
-    metric: str = "cosine"
+    """Configuration for average-linkage clustering."""
+    # Maximum average cosine distance between the articles of one story
+    threshold: float = 0.75
     max_features: int = 5000
     language: str = "german"
     stemming: bool = True
@@ -68,6 +69,9 @@ class WebConfig:
     port: int = 8081
     max_stories: int = 50
     articles_per_story: int = 6
+    # Stories covered by fewer feeds are not shown (filters feed-internal
+    # series and advertising that only resemble each other)
+    min_sources: int = 2
 
 
 @dataclass
@@ -141,7 +145,12 @@ def _apply_yaml_config(config: Config, yaml_config: dict) -> None:
         if web.pop(key, None) is not None:
             logger.warning("web.%s is ignored in config.yaml; the container always "
                            "listens on 8081 (change INTELLIGENCE_PORT in .env)", key)
-    yaml_config = {**yaml_config, 'web': web}
+    clustering = dict(yaml_config.get('clustering') or {})
+    for key in _LEGACY_CLUSTERING_KEYS:
+        if clustering.pop(key, None) is not None:
+            logger.warning("clustering.%s is obsolete (DBSCAN was replaced); "
+                           "use clustering.threshold instead", key)
+    yaml_config = {**yaml_config, 'web': web, 'clustering': clustering}
 
     for section in ('clustering', 'deduplication', 'scheduling',
                     'storage', 'web', 'logging'):
@@ -173,10 +182,11 @@ def _apply_env_config(config: Config) -> None:
         config.miniflux_public_url = public_url
 
     # Clustering
-    if eps := _env('CLUSTERING_EPS'):
-        config.clustering.eps = float(eps)
-    if min_samples := _env('CLUSTERING_MIN_SAMPLES'):
-        config.clustering.min_samples = int(min_samples)
+    if threshold := _env('CLUSTERING_THRESHOLD'):
+        config.clustering.threshold = float(threshold)
+    for obsolete in ('CLUSTERING_EPS', 'CLUSTERING_MIN_SAMPLES'):
+        if _env(obsolete):
+            logger.warning("%s is obsolete and ignored; use CLUSTERING_THRESHOLD", obsolete)
 
     # Deduplication
     if threshold := _env('DEDUP_THRESHOLD'):
@@ -214,10 +224,10 @@ def _validate(config: Config) -> None:
                          f"got '{dedup.canonical_strategy}'")
     if not 0.0 < dedup.threshold <= 1.0:
         raise ValueError("deduplication.threshold must be in (0, 1]")
-    if not 0.0 < config.clustering.eps < 1.0:
-        raise ValueError("clustering.eps must be in (0, 1)")
-    if config.clustering.min_samples < 2:
-        raise ValueError("clustering.min_samples must be at least 2")
+    if not 0.0 < config.clustering.threshold < 1.0:
+        raise ValueError("clustering.threshold must be in (0, 1)")
+    if config.web.min_sources < 1:
+        raise ValueError("web.min_sources must be at least 1")
     if config.scheduling.interval_minutes < 1:
         raise ValueError("scheduling.interval_minutes must be at least 1")
     if config.scheduling.batch_size < 1 or config.scheduling.max_entries < 1:

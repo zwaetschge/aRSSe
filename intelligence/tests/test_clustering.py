@@ -1,6 +1,6 @@
 import miniflux
 
-from conftest import FakeClient, make_entry, sample_entries
+from conftest import BUDGET, FakeClient, make_entry, sample_entries
 from news_clustering import NewsClusterer
 
 
@@ -108,3 +108,14 @@ def test_canonical_strategies(config, store):
     entries[1]['published_at'] = '2099-01-01T00:00:00Z'
     config.deduplication.canonical_strategy = 'newest'
     assert clusterer._select_canonical(entries, [0, 1, 2]) == 1
+
+
+def test_untitled_entry_never_becomes_headline(config, store):
+    entries = sample_entries()
+    # Longest content, but no title: 'longest' strategy must still skip it
+    entries.append(make_entry(9, 3, '', BUDGET * 3))
+    run(config, store, entries)
+
+    budget = next(s for s in store.top_stories(24, 50)
+                  if 9 in {a['id'] for a in s['articles']})
+    assert budget['headline']['title']

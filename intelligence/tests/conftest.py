@@ -82,7 +82,6 @@ class FakeClient:
 def config(tmp_path):
     cfg = Config()
     cfg.storage.db_path = str(tmp_path / 'test.db')
-    cfg.clustering.eps = 0.7
     cfg.deduplication.threshold = 0.9
     return cfg
 

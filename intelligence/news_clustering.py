@@ -9,7 +9,7 @@ Architecture:
     1. Extraction: Fetch recent articles from Miniflux API
     2. Preprocessing: HTML stripping, normalization, stemming
     3. Vectorization: TF-IDF transformation
-    4. Clustering: DBSCAN for topic grouping
+    4. Clustering: average-linkage agglomerative clustering for topic grouping
     5. Deduplication: Near-duplicate detection within clusters
     6. Persistence: Stories go to a local SQLite database (Miniflux cannot
        store tags via its API); duplicates are optionally marked as read
@@ -28,9 +28,9 @@ from urllib.parse import urlparse
 
 import miniflux
 from bs4 import BeautifulSoup
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import AgglomerativeClustering
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics.pairwise import cosine_distances, cosine_similarity
 
 from config import Config, load_config
 from store import ClusterResult, StoryStore
@@ -51,7 +51,9 @@ class NewsClusterer:
     Main clustering engine that groups articles by topic and detects duplicates.
 
     This class implements a simplified version of Google News' clustering logic
-    using TF-IDF vectorization and DBSCAN clustering.
+    using TF-IDF vectorization and average-linkage clustering. Unlike DBSCAN,
+    average linkage cannot chain unrelated topics through a shared keyword:
+    every story must be close to all of its articles on average.
     """
 
     def __init__(self, config: Config, store: StoryStore,
@@ -70,9 +72,8 @@ class NewsClusterer:
         self.stopwords = set(self._get_stopwords())
         self.stemmer = self._get_stemmer()
 
-        logger.info("NewsClusterer initialized with eps=%.2f, min_samples=%d, stemming=%s",
-                    config.clustering.eps, config.clustering.min_samples,
-                    self.stemmer is not None)
+        logger.info("NewsClusterer initialized with threshold=%.2f, stemming=%s",
+                    config.clustering.threshold, self.stemmer is not None)
 
     def _create_client(self) -> miniflux.Client:
         """Create the Miniflux API client."""
@@ -175,7 +176,7 @@ class NewsClusterer:
         """Group entries into clusters and detect duplicates within each."""
         texts = [self._preprocess_entry(e) for e in entries]
         valid_indices = [i for i, t in enumerate(texts) if t]
-        if len(valid_indices) < self.config.clustering.min_samples:
+        if len(valid_indices) < 2:
             logger.info("Not enough valid articles for clustering (%d)", len(valid_indices))
             return []
 
@@ -188,24 +189,28 @@ class NewsClusterer:
             logger.warning("Vectorization failed: %s", e)
             return []
 
-        labels = DBSCAN(
-            eps=self.config.clustering.eps,
-            min_samples=self.config.clustering.min_samples,
-            metric=self.config.clustering.metric,
-        ).fit(tfidf_matrix).labels_
+        labels = AgglomerativeClustering(
+            n_clusters=None,
+            metric='precomputed',
+            linkage='average',
+            distance_threshold=self.config.clustering.threshold,
+        ).fit(cosine_distances(tfidf_matrix)).labels_
 
         cluster_map = {}
         for idx, label in enumerate(labels):
-            if label != -1:  # -1 is noise (no cluster)
-                cluster_map.setdefault(label, []).append(idx)
+            cluster_map.setdefault(label, []).append(idx)
+        # Articles nobody else wrote about stay out of stories
+        cluster_map = {k: v for k, v in cluster_map.items() if len(v) >= 2}
 
         clusters = []
         for member_indices in cluster_map.values():
             cluster_entries = [valid_entries[i] for i in member_indices]
             duplicates = self._detect_duplicates(cluster_entries,
                                                  [valid_texts[i] for i in member_indices])
-            headline_idx = self._select_canonical(cluster_entries,
-                                                  list(range(len(cluster_entries))))
+            # Untitled entries (e.g. news ticker pages) never become the headline
+            titled = [i for i, e in enumerate(cluster_entries) if (e.get('title') or '').strip()]
+            headline_idx = self._select_canonical(
+                cluster_entries, titled or list(range(len(cluster_entries))))
             clusters.append(ClusterResult(
                 entry_ids=[e['id'] for e in cluster_entries],
                 headline_entry_id=cluster_entries[headline_idx]['id'],

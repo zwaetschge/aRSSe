@@ -17,7 +17,7 @@ aRSSe ist ein selbstgehosteter Nachrichten-Aggregator, der die Kernfunktionalit�
                               │
 ┌─────────────────────────────────────────────────────────────┐
 │               Intelligence Layer (Python)                    │
-│   TF-IDF, DBSCAN, Deduplizierung, SQLite-Story-Speicher     │
+│ TF-IDF, Average Linkage, Deduplizierung, SQLite-Speicher    │
 └─────────────────────────────────────────────────────────────┘
                               │
 ┌─────────────────────────────────────────────────────────────┐
@@ -79,14 +79,36 @@ TfidfVectorizer(
 )
 ```
 
-#### DBSCAN Clustering
+#### Agglomeratives Clustering (Average Linkage)
 ```python
-DBSCAN(
-    eps=0.4,           # Ähnlichkeitsschwelle
-    min_samples=2,     # Min. Artikel pro Cluster
-    metric='cosine'    # Kosinus-Distanz
+AgglomerativeClustering(
+    n_clusters=None,
+    metric='precomputed',      # Kosinus-Distanzmatrix
+    linkage='average',
+    distance_threshold=0.75
 )
 ```
+Cluster aus nur einem Artikel sind keine Story. Average Linkage verlangt, dass eine
+Story *im Durchschnitt* allen ihren Artikeln nahe ist. Das vorher verwendete DBSCAN verband
+dagegen Artikel über Ketten einzelner Nachbarn – ein gemeinsames Stichwort wie „Trump“
+reichte, um Gipfeltreffen und Pressestreit zu einer Story zu verschmelzen.
+
+**Kalibrierung** an 519 Artikeln aus 13 deutschen Feeds (24 h, RSS-Kurztexte):
+
+| Verfahren | Stories mit ≥ 2 Quellen | Größte Story | Befund |
+|-----------|------------------------:|-------------:|--------|
+| DBSCAN eps=0.4 | 17 | 6 | sauber, aber 85 % der Artikel ohne Story |
+| DBSCAN eps=0.6 | 45 | 10 | sauber |
+| DBSCAN eps=0.8 | 51 | 135 | Verkettung zu Sammel-Clustern |
+| Average Linkage 0.7 | 68 | 7 | sauber |
+| **Average Linkage 0.75** | **90** | **10** | **sauber (Stichprobe)** |
+| Average Linkage 0.8 | 102 | 14 | erste falsche Paare |
+
+Laufzeit bei 2000 Artikeln: ca. 1 s, ca. 260 MB RAM.
+
+Die Top-Stories-Seite zeigt nur Stories aus mindestens zwei Feeds (`web.min_sources`):
+Werbeblöcke („Anzeige: … Tiefstpreis“) oder Serien einer Redaktion ähneln sich
+untereinander, sind aber keine Nachrichtenlage.
 
 #### Deduplizierung
 - Paarweise Cosine Similarity innerhalb einer Story
@@ -107,7 +129,7 @@ SQLite-Datenbank im Datenverzeichnis des Containers:
 | `story_entries` | Zuordnung Artikel → Story, Duplikat-Flag |
 | `meta` | Zeitpunkt und Statistik des letzten Laufs |
 
-**Stabile Story-IDs:** DBSCAN nummeriert Cluster bei jedem Lauf neu. Ein neuer Cluster
+**Stabile Story-IDs:** Das Clustering nummeriert Cluster bei jedem Lauf neu. Ein neuer Cluster
 übernimmt daher die ID der bisherigen Story, mit der er die meisten Artikel teilt;
 größere Cluster wählen zuerst. Nur wirklich neue Themen bekommen eine neue ID.
 
@@ -188,7 +210,7 @@ die PWA-Installation läuft über Miniflux.
 | Feature | Google News | aRSSe |
 |---------|-------------|-------|
 | Ingestion | Web Crawling | RSS/Atom Feeds |
-| Clustering | Transformer/BERT | TF-IDF + DBSCAN |
+| Clustering | Transformer/BERT | TF-IDF + Average Linkage |
 | Deduplizierung | SimHash | Cosine Similarity |
 | Ranking | ML + Nutzerverhalten | Quellenanzahl + Aktualität |
 | Personalisierung | Deep Learning | Feed-Auswahl, Quellen-Scores |
