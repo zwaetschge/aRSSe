@@ -119,3 +119,19 @@ def test_untitled_entry_never_becomes_headline(config, store):
     budget = next(s for s in store.top_stories(24, 50)
                   if 9 in {a['id'] for a in s['articles']})
     assert budget['headline']['title']
+
+
+def test_headline_is_never_a_duplicate(config, store):
+    config.deduplication.threshold = 0.85  # production default
+    entries = sample_entries()
+    # Untitled near-copy of the budget article with the longest content
+    entries.append(make_entry(9, 3, '', BUDGET + ' ' + BUDGET[:40]))
+    _, client, _ = run(config, store, entries)
+
+    budget = next(s for s in store.top_stories(24, 50)
+                  if 9 in {a['id'] for a in s['articles']})
+    headline = budget['headline']
+    marked = {i for ids, _ in client.marked for i in ids}
+    assert headline['title']
+    assert not headline['is_duplicate']
+    assert headline['id'] not in marked

@@ -207,13 +207,14 @@ class NewsClusterer:
             cluster_entries = [valid_entries[i] for i in member_indices]
             duplicates = self._detect_duplicates(cluster_entries,
                                                  [valid_texts[i] for i in member_indices])
-            # Untitled entries (e.g. news ticker pages) never become the headline
-            titled = [i for i, e in enumerate(cluster_entries) if (e.get('title') or '').strip()]
-            headline_idx = self._select_canonical(
-                cluster_entries, titled or list(range(len(cluster_entries))))
+            headline_idx = self._select_canonical(cluster_entries,
+                                                  list(range(len(cluster_entries))))
+            headline_id = cluster_entries[headline_idx]['id']
+            # The headline is shown as the story; it must never be marked read
+            duplicates.discard(headline_id)
             clusters.append(ClusterResult(
                 entry_ids=[e['id'] for e in cluster_entries],
-                headline_entry_id=cluster_entries[headline_idx]['id'],
+                headline_entry_id=headline_id,
                 duplicate_ids=duplicates,
             ))
 
@@ -323,6 +324,8 @@ class NewsClusterer:
         Select the canonical (best) entry from a group of entries.
 
         Uses configured strategy: longest, source_priority, or newest.
+        Entries with a title always win over untitled ones (e.g. news ticker
+        pages), so duplicate detection and the story headline agree.
         """
         strategy = self.config.deduplication.canonical_strategy
 
@@ -346,7 +349,10 @@ class NewsClusterer:
             def key(i):
                 return len(entries[i].get('content') or '')
 
-        return max(group_indices, key=key)
+        def has_title(i):
+            return bool((entries[i].get('title') or '').strip())
+
+        return max(group_indices, key=lambda i: (has_title(i), key(i)))
 
     def _mark_duplicates_read(self, entries: list, clusters: list) -> int:
         """Mark unread duplicates as read in Miniflux."""

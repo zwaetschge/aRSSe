@@ -71,3 +71,14 @@ def test_single_source_stories_are_hidden(config, store):
     config.web.min_sources = 1
     html = create_app(config, store).test_client().get('/').get_data(as_text=True)
     assert 'Tiefstpreis' in html
+
+
+def test_sources_are_counted_by_feed_id_not_title(config, store):
+    entries = sample_entries()
+    # Two different subscriptions that share a display name
+    for e in entries:
+        e['feed'] = dict(e['feed'], title='News')
+    client_for(config, store, entries)
+
+    counts = sorted(s['source_count'] for s in store.top_stories(24, 50, min_sources=2))
+    assert counts == [2, 3]

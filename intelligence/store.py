@@ -223,7 +223,8 @@ class StoryStore:
             'headline': headline,
             'articles': articles,
             'article_count': len(articles),
-            'source_count': len({a['feed_title'] for a in articles}),
+            # Feed IDs, not titles: two subscriptions may share a display name
+            'source_count': len({a['feed_id'] or a['feed_title'] for a in articles}),
         }
 
 
