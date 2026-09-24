@@ -33,7 +33,8 @@ def make_entry(entry_id, feed_id, title, content, hours_ago=1, status='unread'):
 
 BUDGET = ('Der Bundestag hat den Bundeshaushalt für das kommende Jahr beschlossen. '
           'Finanzminister verteidigt die Schuldenbremse, die Opposition kritisiert '
-          'Kürzungen bei Bildung und Infrastruktur im Haushalt.')
+          'Kürzungen bei Bildung und Infrastruktur im Haushalt. Der Bundesrat '
+          'muss dem Haushalt im Dezember noch zustimmen.')
 CHIP = ('Ein neuer Prozessor mit deutlich höherer Rechenleistung wurde vorgestellt. '
         'Der Chiphersteller verspricht effizientere Grafikeinheiten und längere '
         'Akkulaufzeit für Notebooks mit dem neuen Prozessor.')

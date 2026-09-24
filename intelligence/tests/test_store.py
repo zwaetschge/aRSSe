@@ -276,3 +276,47 @@ def test_service_refuses_to_start_on_newer_database(config, monkeypatch, caplog)
     assert exit_info.value.code == 1
     assert 'neuerer aRSSe-Version' in caplog.text
     assert 'writable' not in caplog.text  # not a permission problem
+
+
+def marked_rows(path):
+    conn = sqlite3.connect(path)
+    try:
+        return dict(conn.execute("SELECT entry_id, marked_at FROM auto_marked"))
+    finally:
+        conn.close()
+
+
+def test_auto_marked_entries_are_remembered_until_they_leave_the_window(store):
+    store.save_run(sample_entries(), budget_clusters())
+    store.record_auto_marked([2])
+    assert store.auto_marked_ids() == {2}
+    # Miniflux reports the entry unread again (the user reset it)
+    store.save_run(sample_entries(), budget_clusters())
+    assert store.auto_marked_ids() == {2}
+
+    now = datetime.now(timezone.utc)
+    store.record_auto_marked([3, 4])
+    conn = sqlite3.connect(store.db_path)
+    with conn:
+        conn.execute("UPDATE auto_marked SET marked_at = ? WHERE entry_id = 3",
+                     (db_timestamp(now - timedelta(hours=24 + 24, minutes=1)),))
+        conn.execute("UPDATE auto_marked SET marked_at = ? WHERE entry_id = 4",
+                     (db_timestamp(now - timedelta(hours=24 + 23)),))
+    conn.close()
+    store.cleanup(7, lookback_hours=24)
+    assert set(marked_rows(store.db_path)) == {2, 4}
+    store.cleanup(7, lookback_hours=12)
+    assert set(marked_rows(store.db_path)) == {2}
+
+
+def test_v2_database_gets_auto_marked_table(tmp_path, monkeypatch):
+    path = str(tmp_path / 'arsse.db')
+    monkeypatch.setattr(store_module, 'MIGRATIONS', MIGRATIONS[:2])
+    StoryStore(path)
+    assert user_version(path) == 2
+    monkeypatch.undo()
+
+    st = StoryStore(path)
+    assert user_version(path) == len(MIGRATIONS)
+    st.record_auto_marked([1])
+    assert st.auto_marked_ids() == {1}

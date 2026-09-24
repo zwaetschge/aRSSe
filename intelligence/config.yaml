@@ -36,10 +36,19 @@ clustering:
   stemming: true
 
 # Deduplizierung
+# Duplikate sind (1) derselbe Artikel doppelt im Feed (gleiche URL, gleicher
+# Titel, gleicher Text) oder (2) Artikel verschiedener Feeds mit fast gleichem
+# Text. Der Titel zählt dabei nicht mit, und innerhalb eines Feeds gibt es
+# sonst keine Duplikate (Sendungen wie „tagesschau“ tragen täglich denselben Titel).
 deduplication:
-  # Schwellenwert für Duplikat-Erkennung (0.0-1.0)
-  # Höhere Werte = nur sehr ähnliche Artikel werden als Duplikate erkannt
+  # Schwellenwert für Duplikat-Erkennung (0.0-1.0), verglichen wird der Text
+  # ohne Titel. Höhere Werte = nur sehr ähnliche Artikel werden als Duplikate erkannt
   threshold: 0.85
+
+  # Mindestlänge des Textes (Wörter ohne Titel), damit Artikel verschiedener
+  # Feeds überhaupt verglichen werden. Kurze Anrisstexte wie „[ mehr ]“ sagen
+  # nichts über den Artikel.
+  min_body_tokens: 25
 
   # Strategie zur Auswahl des "besten" Artikels (auch Schlagzeile der Story)
   # Optionen: "longest", "source_priority", "newest"
@@ -58,7 +67,15 @@ deduplication:
   # Aktion für Duplikate
   #   "mark_read": Duplikate in Miniflux als gelesen markieren
   #   "none":      nur in Top Stories als Duplikat kennzeichnen
+  # Jedes Duplikat wird nur einmal markiert: Wer es in Miniflux wieder auf
+  # ungelesen setzt, behält es ungelesen.
   duplicate_action: "mark_read"
+
+  # Wo "mark_read" greift
+  #   "visible": nur in Stories, die die Startseite zeigt (web.min_sources),
+  #              doppelt gelieferte Artikel (Fall 1) überall
+  #   "all":     in allen Stories
+  mark_read_scope: "visible"
 
 # Scheduling
 scheduling:

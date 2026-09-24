@@ -118,11 +118,33 @@ Werbeblöcke („Anzeige: … Tiefstpreis“) oder Serien einer Redaktion ähnel
 untereinander, sind aber keine Nachrichtenlage.
 
 #### Deduplizierung
-- Paarweise Cosine Similarity innerhalb einer Story
+Innerhalb einer Story gilt ein Paar als Duplikat, wenn (in dieser Reihenfolge):
+
+1. es derselbe Artikel zweimal ist: gleiche URL (Schema und Host ohne Groß-/Kleinschreibung,
+   ohne `#…`, `utm_*`, `wt_mc` und abschließenden `/`), gleicher Titel, gleicher Text. Feeds
+   liefern Artikel manchmal doppelt, und Miniflux speichert beide (im Kalibrierkorpus 9 Paare
+   der Tagesschau). Die URL allein reicht nicht: Einträge ohne Link bekommen in Miniflux die
+   Adresse der Website;
+2. sonst nie, wenn beide aus demselben Feed stammen: Sendungen und Serien tragen denselben
+   Titel und denselben Anrisstext („tagesschau“ mit „[ mehr ]“), sind aber verschiedene Beiträge;
+3. bei verschiedenen Feeds, wenn die Texte **ohne Titel** eine Cosine Similarity von mindestens
+   `deduplication.threshold` (0.85) erreichen und beide mindestens
+   `deduplication.min_body_tokens` Wörter (25) haben. Mit Titel entschied bei kurzen
+   Anrisstexten die gleiche Überschrift allein.
+
 - Eigene Term-Frequenz-Vektoren über das volle Vokabular: Das Clustering verwirft seltene Terme (`min_df`), und genau diese unterscheiden zwei Berichte zum selben Thema
-- Schwellenwert: 0.85 (konfigurierbar)
-- Kanonisierung: längster, priorisierter oder neuester Artikel
-- Duplikate werden optional per `PUT /v1/entries` in Miniflux als gelesen markiert
+- Kanonisierung: längster (Textlänge ohne HTML), priorisierter oder neuester Artikel; Artikel mit
+  Titel vor solchen ohne. Bei Gleichstand gewinnt die kleinere Artikel-ID (zuerst gespeichert) –
+  sonst tauschten identische Kopien je nach Reihenfolge der API-Antwort die Rollen, und beide
+  wurden nach und nach als gelesen markiert
+- Gruppen: Der beste noch freie Artikel bleibt stehen und nimmt alle freien Artikel auf, die
+  Duplikate *von ihm* sind; die übrigen bilden eigene Gruppen. Jedes Duplikat wurde also mit dem
+  Artikel verglichen, der ungelesen bleibt
+- Duplikate werden optional per `PUT /v1/entries` in Miniflux als gelesen markiert, mit
+  `mark_read_scope: visible` (Standard) nur in Stories aus mindestens `web.min_sources` Feeds und
+  doppelt gelieferte Artikel (Fall 1) überall. Die Tabelle `auto_marked` merkt sich, was aRSSe
+  markiert hat: Setzt der Nutzer ein Duplikat wieder auf ungelesen, bleibt es dabei. Einträge
+  verfallen nach `lookback_hours` + 24 h, dann liegt der Artikel außerhalb jedes Abrufs
 
 #### Story-Speicher
 Die Miniflux-API kann Einträge nur in Titel, Inhalt und Status ändern – Tags oder
@@ -135,6 +157,7 @@ SQLite-Datenbank im Datenverzeichnis des Containers:
 | `stories` | Story-ID, Schlagzeilen-Artikel, erstmals/zuletzt gesehen |
 | `story_entries` | Zuordnung Artikel → Story, Duplikat-Flag |
 | `meta` | Zeitpunkt und Statistik des letzten Laufs |
+| `auto_marked` | Von aRSSe als gelesen markierte Duplikate (werden nie erneut markiert) |
 
 **Abruf:** Die Artikel des Zeitfensters kommen seitenweise nach Artikel-ID absteigend
 (`order=id`, ab der zweiten Seite `before_entry_id` = kleinste ID der Vorseite). Seiten

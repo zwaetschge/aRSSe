@@ -153,3 +153,27 @@ def test_malformed_numbers_in_env_name_the_variable(monkeypatch):
 
 def test_config_error_is_a_value_error():
     assert issubclass(ConfigError, ValueError)
+
+
+def test_dedup_body_tokens_and_scope(tmp_path, monkeypatch):
+    monkeypatch.delenv('DEDUP_MIN_BODY_TOKENS', raising=False)
+    cfg = load_config(None)
+    assert cfg.deduplication.min_body_tokens == 25
+    assert cfg.deduplication.mark_read_scope == 'visible'
+
+    path = write_yaml(tmp_path, 'deduplication:\n  min_body_tokens: 40\n'
+                                '  mark_read_scope: all\n')
+    cfg = load_config(path)
+    assert cfg.deduplication.min_body_tokens == 40
+    assert cfg.deduplication.mark_read_scope == 'all'
+
+    monkeypatch.setenv('DEDUP_MIN_BODY_TOKENS', '10')
+    assert load_config(path).deduplication.min_body_tokens == 10
+    monkeypatch.setenv('DEDUP_MIN_BODY_TOKENS', 'viele')
+    with pytest.raises(ConfigError, match='DEDUP_MIN_BODY_TOKENS'):
+        load_config(path)
+    monkeypatch.delenv('DEDUP_MIN_BODY_TOKENS')
+
+    for bad in ('min_body_tokens: 0', 'min_body_tokens: "25"', 'mark_read_scope: shown'):
+        with pytest.raises(ConfigError, match=bad.split(':')[0]):
+            load_config(write_yaml(tmp_path, f'deduplication:\n  {bad}\n'))

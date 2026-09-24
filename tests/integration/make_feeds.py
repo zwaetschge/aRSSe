@@ -9,7 +9,8 @@ from xml.sax.saxutils import escape
 
 BUDGET = ('Der Bundestag hat den Bundeshaushalt für das kommende Jahr beschlossen. '
           'Der Finanzminister verteidigt die Schuldenbremse, die Opposition kritisiert '
-          'Kürzungen bei Bildung und Infrastruktur im Haushalt.')
+          'Kürzungen bei Bildung und Infrastruktur im Haushalt. Der Bundesrat muss dem '
+          'Haushalt im Dezember noch zustimmen.')
 CHIP = ('Ein Chiphersteller hat einen neuen Prozessor mit deutlich höherer Rechenleistung '
         'vorgestellt. Er verspricht effizientere Grafikeinheiten und längere Akkulaufzeit '
         'für Notebooks.')
@@ -21,7 +22,8 @@ FEEDS = {
         ('Wetter: Sonne am Wochenende', 'Meteorologen erwarten sommerliche Temperaturen.'),
     ],
     'beta': [
-        # Agency copy: near-identical to alpha's budget article -> duplicate
+        # Agency copy: same text as alpha's budget article -> duplicate
+        # (needs deduplication.min_body_tokens words besides the title)
         ('Bundestag beschließt Haushalt', BUDGET),
         ('Chiphersteller zeigt neuen Prozessor',
          'Der neue Prozessor soll Notebooks schneller machen. Erste Benchmarks zur '

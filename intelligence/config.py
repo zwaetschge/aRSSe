@@ -19,6 +19,7 @@ import yaml
 logger = logging.getLogger('arsse-intelligence')
 
 DUPLICATE_ACTIONS = ('none', 'mark_read')
+MARK_READ_SCOPES = ('visible', 'all')
 CANONICAL_STRATEGIES = ('longest', 'source_priority', 'newest')
 
 # Values accepted by older versions of config.yaml
@@ -53,6 +54,13 @@ class DeduplicationConfig:
     canonical_strategy: str = "longest"
     source_scores: dict = field(default_factory=dict)
     duplicate_action: str = "mark_read"
+    # Articles from different feeds are only compared if both bodies (without
+    # the title) have at least this many words: teasers like '[ mehr ]' say
+    # nothing about the article
+    min_body_tokens: int = 25
+    # 'visible': mark read only in stories shown on the front page
+    # (web.min_sources feeds) and identical copies; 'all': in every cluster
+    mark_read_scope: str = "visible"
 
 
 @dataclass
@@ -229,6 +237,9 @@ def _apply_env_config(config: Config) -> None:
         config.deduplication.threshold = _env_number('DEDUP_THRESHOLD', threshold, float)
     if action := _env('DEDUP_ACTION'):
         config.deduplication.duplicate_action = action
+    if min_tokens := _env('DEDUP_MIN_BODY_TOKENS'):
+        config.deduplication.min_body_tokens = _env_number('DEDUP_MIN_BODY_TOKENS',
+                                                           min_tokens, int)
 
     # Scheduling
     if interval := _env('CLUSTERING_INTERVAL'):
@@ -256,6 +267,7 @@ _NUMERIC_FIELDS = (
     ('clustering.threshold', ('clustering', 'threshold'), False),
     ('clustering.max_features', ('clustering', 'max_features'), True),
     ('deduplication.threshold', ('deduplication', 'threshold'), False),
+    ('deduplication.min_body_tokens', ('deduplication', 'min_body_tokens'), True),
     ('scheduling.interval_minutes', ('scheduling', 'interval_minutes'), True),
     ('scheduling.batch_size', ('scheduling', 'batch_size'), True),
     ('scheduling.max_entries', ('scheduling', 'max_entries'), True),
@@ -302,8 +314,13 @@ def _validate(config: Config) -> None:
     if dedup.canonical_strategy not in CANONICAL_STRATEGIES:
         raise ConfigError(f"deduplication.canonical_strategy must be one of "
                           f"{CANONICAL_STRATEGIES}, got '{dedup.canonical_strategy}'")
+    if dedup.mark_read_scope not in MARK_READ_SCOPES:
+        raise ConfigError(f"deduplication.mark_read_scope must be one of "
+                          f"{MARK_READ_SCOPES}, got '{dedup.mark_read_scope}'")
     if not 0.0 < dedup.threshold <= 1.0:
         raise ConfigError("deduplication.threshold must be in (0, 1]")
+    if dedup.min_body_tokens < 1:
+        raise ConfigError("deduplication.min_body_tokens must be at least 1")
     if not 0.0 < config.clustering.threshold < 1.0:
         raise ConfigError("clustering.threshold must be in (0, 1)")
     if config.clustering.max_features is not None and config.clustering.max_features < 1:

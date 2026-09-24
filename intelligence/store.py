@@ -81,6 +81,16 @@ UPDATE entries SET published_at = substr(published_at, 1, 19) || '+00:00'
     WHERE length(published_at) > 25;
 """
 
+# Duplicates aRSSe marked read in Miniflux. A duplicate is marked only once:
+# if the user sets it back to unread, that decision stands. save_run never
+# touches this table; cleanup drops rows once the entry left the window.
+SCHEMA_V3 = """
+CREATE TABLE auto_marked (
+    entry_id  INTEGER PRIMARY KEY,
+    marked_at TEXT NOT NULL
+);
+"""
+
 
 class _Rebuild:
     def __repr__(self) -> str:
@@ -99,6 +109,7 @@ REBUILD = _Rebuild()
 MIGRATIONS = [
     SCHEMA_V1,
     SCHEMA_V2,
+    SCHEMA_V3,
 ]
 
 
@@ -125,6 +136,9 @@ class ClusterResult:
     entry_ids: list
     headline_entry_id: int
     duplicate_ids: set
+    # Duplicates that are the same item listed twice (same URL, title and
+    # text as the article that stays unread); a subset of duplicate_ids
+    copy_ids: set = field(default_factory=set)
 
 
 def _now() -> str:
@@ -305,21 +319,36 @@ class StoryStore:
 
         return assigned
 
-    def mark_read(self, entry_ids: list) -> None:
-        """Record that entries were marked as read in Miniflux."""
+    def record_auto_marked(self, entry_ids: list) -> None:
+        """Record that aRSSe marked entries as read in Miniflux."""
+        marked_at = db_timestamp(datetime.now(timezone.utc))
         with self._connect() as conn:
             conn.executemany("UPDATE entries SET status = 'read' WHERE id = ?",
                              [(i,) for i in entry_ids])
+            conn.executemany("INSERT OR REPLACE INTO auto_marked (entry_id, marked_at) "
+                             "VALUES (?, ?)", [(i, marked_at) for i in entry_ids])
 
-    def cleanup(self, retention_days: int) -> None:
+    def auto_marked_ids(self) -> set:
+        """IDs of entries that aRSSe marked as read before; they are never marked again."""
+        with self._connect() as conn:
+            return {row['entry_id'] for row in conn.execute("SELECT entry_id FROM auto_marked")}
+
+    def cleanup(self, retention_days: int, lookback_hours: int = 24) -> None:
         """
         Remove articles and stories older than the retention period.
 
         Retention applies per article: a story that keeps running for weeks
-        loses its old articles, and only then the story itself.
+        loses its old articles, and only then the story itself. Records of
+        entries marked read are kept for lookback_hours plus a day: an entry
+        marked at time T was published before T and has left the window
+        (and every fetch) by T + lookback_hours.
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=retention_days)
+        marked_cutoff = now - timedelta(hours=lookback_hours + 24)
         with self._connect() as conn:
+            conn.execute("DELETE FROM auto_marked WHERE marked_at < ?",
+                         (db_timestamp(marked_cutoff),))
             conn.execute("""DELETE FROM story_entries WHERE entry_id IN
                             (SELECT id FROM entries WHERE published_at < ?)""",
                          (db_timestamp(cutoff),))

@@ -95,6 +95,7 @@ services:
       - CLUSTERING_THRESHOLD=${CLUSTERING_THRESHOLD:-}
       - DEDUP_THRESHOLD=${DEDUP_THRESHOLD:-}
       - DEDUP_ACTION=${DEDUP_ACTION:-}
+      - DEDUP_MIN_BODY_TOKENS=${DEDUP_MIN_BODY_TOKENS:-}
       - LOG_LEVEL=${LOG_LEVEL:-}
       - TZ=${TZ:-Europe/Berlin}
       # Der Container startet als root, übergibt ${DATA_PATH}/intelligence an

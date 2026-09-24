@@ -24,7 +24,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 import miniflux
 from bs4 import BeautifulSoup
@@ -54,6 +54,8 @@ _DATA_URI_RE = re.compile(r'(?<![^\s"\'<>()])data:[^\s"\'<>()]{250,}', re.IGNORE
 MIN_RETRY_SECONDS = 10
 
 _TOKEN_RE = re.compile(r'\b\w\w+\b')
+# Query parameters that only track the click, not select the article
+_TRACKING_PARAM_RE = re.compile(r'utm_.*|wt_mc', re.IGNORECASE)
 
 
 class NewsClusterer:
@@ -164,7 +166,8 @@ class NewsClusterer:
             stats['duplicates_detected'] = sum(len(c.duplicate_ids) for c in clusters)
 
             self.store.save_run(entries, clusters, fetch, self.config.web.min_sources)
-            self.store.cleanup(self.config.storage.retention_days)
+            self.store.cleanup(self.config.storage.retention_days,
+                               self.config.scheduling.lookback_hours)
 
             if self.config.deduplication.duplicate_action == 'mark_read':
                 stats['marked_read'] = self._mark_duplicates_read(entries, clusters)
@@ -216,17 +219,18 @@ class NewsClusterer:
         clusters = []
         for member_indices in cluster_map.values():
             cluster_entries = [valid_entries[i] for i in member_indices]
-            duplicates = self._detect_duplicates(cluster_entries,
-                                                 [valid_texts[i] for i in member_indices])
+            duplicates, copies = self._detect_duplicates(cluster_entries)
             headline_idx = self._select_canonical(cluster_entries,
                                                   list(range(len(cluster_entries))))
             headline_id = cluster_entries[headline_idx]['id']
             # The headline is shown as the story; it must never be marked read
             duplicates.discard(headline_id)
+            copies.discard(headline_id)
             clusters.append(ClusterResult(
                 entry_ids=[e['id'] for e in cluster_entries],
                 headline_entry_id=headline_id,
                 duplicate_ids=duplicates,
+                copy_ids=copies,
             ))
 
         logger.info("Found %d clusters", len(clusters))
@@ -301,7 +305,10 @@ class NewsClusterer:
         Preprocess an entry for vectorization.
 
         Combines title and content, removes HTML, normalizes text.
-        Stores a plain-text snippet on the entry for the web interface.
+        Stores on the entry: a plain-text snippet for the web interface
+        ('_snippet'), the length of the plain text ('_text_len', for the
+        'longest' strategy) and the normalized text without the title
+        ('_body', for duplicate detection).
         """
         title = (entry.get('title') or '')[:MAX_TITLE_CHARS]
         content = entry.get('content') or ''
@@ -313,105 +320,210 @@ class NewsClusterer:
             content = BeautifulSoup(content, 'lxml').get_text(separator=' ')
         content = re.sub(r'\s+', ' ', content).strip()
         entry['_snippet'] = _truncate(content, SNIPPET_LENGTH)
+        entry['_text_len'] = len(content)
+        body = _normalize(content[:MAX_CONTENT_CHARS])
+        entry['_body'] = body
 
         # Title weighted more heavily
-        text = f"{title} {title} {content[:MAX_CONTENT_CHARS]}"
+        title = _normalize(title)
+        return ' '.join(part for part in (title, title, body) if part)
 
-        text = text.lower()
-        text = re.sub(r'[^\w\s]', ' ', text)  # Remove punctuation
-        text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
-        return text.strip()
-
-    def _detect_duplicates(self, entries: list, texts: list) -> set:
+    def _detect_duplicates(self, entries: list) -> tuple:
         """
         Detect near-duplicate articles within a cluster.
 
-        Uses term frequencies over the full vocabulary: the clustering
-        vectorizer drops rare terms (min_df), which would hide exactly the
-        text that makes two articles on the same topic different.
+        Two articles are duplicates if
+
+        1. they are the same item twice: same URL (see _norm_url), same
+           title and the same text. Feeds sometimes list an item twice,
+           and Miniflux stores both copies;
+        2. otherwise never if they come from the same feed: a feed does not
+           copy itself, but its series share titles and boilerplate
+           ('tagesschau' with the body '[ mehr ]');
+        3. from different feeds, if their texts without the title reach a
+           cosine similarity of deduplication.threshold and both have at
+           least deduplication.min_body_tokens words. Titles are left out:
+           two teasers with the same headline and no text of their own
+           would otherwise always match.
+
+        Similarity uses term frequencies over the full vocabulary: the
+        clustering vectorizer drops rare terms (min_df), which would hide
+        exactly the text that makes two articles on the same topic
+        different.
+
+        Groups are built in canonical order (see _canonical_key): the best
+        entry not yet assigned keeps its status and takes every unassigned
+        entry that is a duplicate of it; the rest stays for the next group.
+        Every duplicate has thus been compared with the article that stays.
 
         Returns:
-            Set of entry IDs that are duplicates (not the canonical version).
+            Tuple (duplicates, copies): IDs of all duplicates (not the
+            canonical versions), and the subset that matched rule 1.
         """
         if len(entries) < 2:
-            return set()
+            return set(), set()
 
+        dedup = self.config.deduplication
+        bodies = [self._body(e) for e in entries]
+        similarity = self._body_similarity(bodies)
+        long_enough = [len(_TOKEN_RE.findall(b)) >= dedup.min_body_tokens for b in bodies]
+        urls = [_norm_url(e.get('url')) for e in entries]
+        titles = [_normalize((e.get('title') or '')[:MAX_TITLE_CHARS]) for e in entries]
+        feeds = [_feed_id(e) for e in entries]
+
+        def similar(i, j):
+            return bodies[i] == bodies[j] or (similarity is not None
+                                              and similarity[i, j] >= dedup.threshold)
+
+        def same_item(i, j):
+            return bool(urls[i]) and urls[i] == urls[j] and titles[i] == titles[j] \
+                and similar(i, j)
+
+        def duplicate_of(i, j):
+            if feeds[i] == feeds[j]:
+                return False
+            return long_enough[i] and long_enough[j] and similar(i, j)
+
+        order = sorted(range(len(entries)), key=lambda i: self._canonical_key(entries[i]),
+                       reverse=True)
+        duplicates = set()
+        copies = set()
+        assigned = set()
+        for seed in order:
+            if seed in assigned:
+                continue
+            assigned.add(seed)
+            for member in order:
+                if member in assigned:
+                    continue
+                if same_item(member, seed):
+                    copies.add(entries[member]['id'])
+                elif not duplicate_of(member, seed):
+                    continue
+                duplicates.add(entries[member]['id'])
+                assigned.add(member)
+
+        return duplicates, copies
+
+    def _body(self, entry: dict) -> str:
+        """The normalized text of an entry without its title."""
+        if '_body' not in entry:
+            self._preprocess_entry(entry)
+        return entry['_body']
+
+    def _body_similarity(self, bodies: list):
+        """Pairwise cosine similarity of term frequencies; None without any tokens."""
         vectorizer = TfidfVectorizer(tokenizer=self._tokenize, token_pattern=None,
                                      lowercase=False, ngram_range=(1, 2),
                                      use_idf=False, sublinear_tf=True)
         try:
-            similarity_matrix = cosine_similarity(vectorizer.fit_transform(texts))
+            return cosine_similarity(vectorizer.fit_transform(bodies))
         except ValueError:  # no tokens left after stopword removal
-            return set()
-        threshold = self.config.deduplication.threshold
-
-        duplicates = set()
-        processed = set()
-
-        for i in range(len(entries)):
-            if i in processed:
-                continue
-
-            group = [i]
-            for j in range(i + 1, len(entries)):
-                if j not in processed and similarity_matrix[i, j] >= threshold:
-                    group.append(j)
-                    processed.add(j)
-
-            if len(group) > 1:
-                canonical_idx = self._select_canonical(entries, group)
-                duplicates.update(entries[idx]['id'] for idx in group
-                                  if idx != canonical_idx)
-
-            processed.add(i)
-
-        return duplicates
+            return None
 
     def _select_canonical(self, entries: list, group_indices: list) -> int:
         """
         Select the canonical (best) entry from a group of entries.
 
-        Uses configured strategy: longest, source_priority, or newest.
-        Entries with a title always win over untitled ones (e.g. news ticker
-        pages), so duplicate detection and the story headline agree.
+        See _canonical_key.
+        """
+        return max(group_indices, key=lambda i: self._canonical_key(entries[i]))
+
+    def _canonical_key(self, entry: dict) -> tuple:
+        """
+        Rank an entry as canonical version: the higher, the better.
+
+        Uses the configured strategy: longest (plain text, not HTML),
+        source_priority or newest. Entries with a title always win over
+        untitled ones (e.g. news ticker pages), so duplicate detection and
+        the story headline agree. On a tie the lowest (first stored) ID
+        wins: identical copies must not swap roles with the order in which
+        Miniflux returns them.
         """
         strategy = self.config.deduplication.canonical_strategy
 
         if strategy == 'source_priority':
-            scores = self.config.deduplication.source_scores
-
-            def key(i):
-                feed = entries[i].get('feed') or {}
-                domain = urlparse(feed.get('site_url', '')).netloc.removeprefix('www.')
-                return scores.get(domain, 50)
-
+            feed = entry.get('feed') or {}
+            domain = urlparse(feed.get('site_url', '')).netloc.removeprefix('www.')
+            key = self.config.deduplication.source_scores.get(domain, 50)
         elif strategy == 'newest':
-            def key(i):
-                published = entries[i].get('published_at') or ''
-                try:
-                    return datetime.fromisoformat(published.replace('Z', '+00:00'))
-                except (ValueError, TypeError):
-                    return datetime.min.replace(tzinfo=timezone.utc)
-
+            published = entry.get('published_at') or ''
+            try:
+                key = datetime.fromisoformat(published.replace('Z', '+00:00'))
+            except (ValueError, TypeError, AttributeError):
+                key = datetime.min.replace(tzinfo=timezone.utc)
+            if key.tzinfo is None:
+                key = key.replace(tzinfo=timezone.utc)
         else:  # 'longest'
-            def key(i):
-                return len(entries[i].get('content') or '')
+            if '_text_len' not in entry:
+                self._preprocess_entry(entry)
+            key = entry['_text_len']
 
-        def has_title(i):
-            return bool((entries[i].get('title') or '').strip())
-
-        return max(group_indices, key=lambda i: (has_title(i), key(i)))
+        has_title = bool((entry.get('title') or '').strip())
+        return (has_title, key, -entry['id'])
 
     def _mark_duplicates_read(self, entries: list, clusters: list) -> int:
-        """Mark unread duplicates as read in Miniflux."""
+        """
+        Mark unread duplicates as read in Miniflux.
+
+        With mark_read_scope 'visible' only in clusters that the front page
+        shows (web.min_sources feeds); identical copies (rule 1 of
+        _detect_duplicates) everywhere. An entry is marked only once: if
+        the user sets it back to unread, it stays unread.
+        """
+        feed_of = {e['id']: _feed_id(e) for e in entries}
+        min_sources = self.config.web.min_sources
+        mark_all = self.config.deduplication.mark_read_scope == 'all'
+        candidates = set()
+        for cluster in clusters:
+            feeds = {feed_of.get(eid, eid) for eid in cluster.entry_ids}
+            if mark_all or len(feeds) >= min_sources:
+                candidates |= cluster.duplicate_ids
+            else:
+                candidates |= cluster.copy_ids
+
         unread = {e['id'] for e in entries if e.get('status') == 'unread'}
-        to_mark = sorted(eid for c in clusters for eid in c.duplicate_ids if eid in unread)
+        candidates &= unread
+        if candidates:
+            candidates -= self.store.auto_marked_ids()
+        to_mark = sorted(candidates)
         if not to_mark:
             return 0
 
         self.client.update_entries(to_mark, status='read')
-        self.store.mark_read(to_mark)
+        self.store.record_auto_marked(to_mark)
         return len(to_mark)
+
+
+def _normalize(text: str) -> str:
+    """Lowercase, replace punctuation with spaces and collapse whitespace."""
+    text = re.sub(r'[^\w\s]', ' ', text.lower())
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _norm_url(url) -> str:
+    """
+    Normalize an article URL for comparison ('' if there is none).
+
+    Scheme and host are case-insensitive; the fragment, tracking
+    parameters (utm_*, wt_mc) and a trailing slash do not change the
+    article.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return ''
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return url.strip()
+    query = urlencode([(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                       if not _TRACKING_PARAM_RE.fullmatch(k)])
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(),
+                       parts.path.rstrip('/'), query, ''))
+
+
+def _feed_id(entry: dict):
+    """The feed an entry belongs to."""
+    return entry.get('feed_id') or (entry.get('feed') or {}).get('id')
 
 
 def _truncate(text: str, length: int) -> str:

@@ -90,8 +90,8 @@ Der Python-Service läuft zyklisch (Standard: alle 30 Minuten) und führt folgen
 2. **Preprocessing**: HTML entfernen, Normalisierung, Stopwords, Stemming (Snowball)
 3. **Vectorization**: TF-IDF über Uni- und Bigramme
 4. **Clustering**: Agglomeratives Clustering (Average Linkage) gruppiert Artikel zum selben Ereignis zu einer *Story*
-5. **Deduplication**: Near-Duplicates (z.B. identische Agenturmeldungen) innerhalb einer Story
-6. **Persistence**: Stories landen in einer lokalen SQLite-Datenbank (`data/intelligence/arsse.db`) mit über Läufe hinweg stabilen IDs; Duplikate werden optional in Miniflux als gelesen markiert. Artikel im Zeitfenster, die es in Miniflux nicht mehr gibt (z.B. nach „Verlauf leeren“ oder dem Abbestellen eines Feeds), verschwinden beim nächsten Lauf aus ihren Stories; ältere Artikel unter „Frühere Berichte“ verlinken deshalb auf das Original beim Anbieter. Nach einem Update passt der Service das Schema der Datenbank beim Start selbst an
+5. **Deduplication**: Near-Duplicates (z.B. identische Agenturmeldungen verschiedener Feeds, verglichen ohne Titel) und doppelt gelieferte Artikel innerhalb einer Story
+6. **Persistence**: Stories landen in einer lokalen SQLite-Datenbank (`data/intelligence/arsse.db`) mit über Läufe hinweg stabilen IDs; Duplikate werden optional in Miniflux als gelesen markiert – standardmäßig nur in Stories, die die Startseite zeigt (doppelt gelieferte Artikel überall), und jedes nur einmal: Wer ein Duplikat wieder auf ungelesen setzt, behält es ungelesen. Artikel im Zeitfenster, die es in Miniflux nicht mehr gibt (z.B. nach „Verlauf leeren“ oder dem Abbestellen eines Feeds), verschwinden beim nächsten Lauf aus ihren Stories; ältere Artikel unter „Frühere Berichte“ verlinken deshalb auf das Original beim Anbieter. Nach einem Update passt der Service das Schema der Datenbank beim Start selbst an
 
 Die Miniflux-API kann keine Tags oder eigenen Metadaten schreiben – deshalb bringt der Service eine eigene, JavaScript-freie Oberfläche mit:
 
@@ -113,8 +113,10 @@ clustering:
   stemming: true
 
 deduplication:
-  threshold: 0.85                # Duplikat-Schwellenwert
+  threshold: 0.85                # Duplikat-Schwellenwert (Text ohne Titel)
+  min_body_tokens: 25            # kürzere Texte verschiedener Feeds sind nie Duplikate
   duplicate_action: "mark_read"  # oder "none"
+  mark_read_scope: "visible"     # oder "all" (auch Stories, die die Startseite nicht zeigt)
 
 scheduling:
   interval_minutes: 30           # Ausführungsintervall
