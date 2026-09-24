@@ -173,11 +173,15 @@ werden vom besten an vergeben, solange weder Cluster noch Story schon vergeben s
    Eine ID, die auf der Startseite stand, bleibt dort; eine unsichtbare Serie eines einzelnen
    Feeds kann sie weder übernehmen, wenn beide für einen Lauf verschmelzen, noch behalten,
    wenn sie sich wieder trennen.
-2. Mehr gemeinsame Artikel: Die eigentliche Fortsetzung behält die ID, nicht ein Nebenthema,
-   das einen Artikel mitgenommen hat.
-3. Der Cluster enthält den bisherigen Schlagzeilen-Artikel – bei einer Teilung in gleich
-   große Hälften folgt die ID also dem Titel, den der Nutzer kannte.
-4. Danach sichtbare vor unsichtbaren, größere vor kleineren Clustern.
+2. Unter solchen Paaren: mehr gemeinsame Artikel. Die eigentliche Fortsetzung behält die ID,
+   nicht ein Nebenthema, das einen Artikel mitgenommen hat.
+3. Die Story war sichtbar und der Cluster enthält ihren Schlagzeilen-Artikel. Setzt kein
+   sichtbarer Cluster sie fort, bleibt die ID beim Titel, den der Nutzer kannte, statt an eine
+   größere unsichtbare Serie zu gehen – auch wenn das Ereignis für einen Lauf nur noch einen
+   Feed hat.
+4. Mehr gemeinsame Artikel, dann der Cluster mit dem bisherigen Schlagzeilen-Artikel – bei
+   einer Teilung in gleich große Hälften folgt die ID also dem Titel.
+5. Danach sichtbare vor unsichtbaren, größere vor kleineren Clustern.
 
 Nur Cluster ohne passende Story bekommen eine neue ID. Bei einer Wiederholung des Korpus
 mit 30-Minuten-Läufen (24 h und 6 h Zeitfenster) bekam keine sichtbare beste Fortsetzung
@@ -188,7 +192,9 @@ ihrer Story zugeordnet, zählen aber nicht mehr: Quellen- und Artikelzahl, Ranki
 `web.min_sources` beziehen sich nur auf Artikel im Fenster. Eine Story ohne Artikel im
 Fenster erscheint nicht mehr (auch nicht unter `/story/<id>`). Die Story-Seite listet ältere
 Artikel unter „Frühere Berichte“ (höchstens `web.earlier_articles_max`, Standard 20). Liegt der
-bisherige Schlagzeilen-Artikel außerhalb des Fensters, steht der neueste Artikel oben.
+bisherige Schlagzeilen-Artikel außerhalb des Fensters, steht der neueste Artikel oben, der
+kein Duplikat ist. Die Startseite verlinkt die Story-Seite, sobald es mehr Artikel gibt, als
+sie zeigt, oder frühere Berichte.
 
 **Gelöschte Artikel:** „Verlauf leeren“ in Miniflux löscht gelesene Artikel – auch die
 Duplikate, die aRSSe selbst als gelesen markiert –, und ein abbestellter Feed nimmt seine
@@ -197,7 +203,10 @@ jeder Lauf daher gespeicherte Artikel, die nach dem Beginn des Zeitfensters (plu
 Sicherheitsabstand) erschienen sind, aber nicht mehr geliefert wurden: Miniflux hätte sie
 liefern müssen, denn gespeichert ist höchstens das Datum, nach dem Miniflux filtert. War der
 Abruf wegen `max_entries` unvollständig, gilt das nur ab der kleinsten gelieferten Artikel-ID.
-Stories, denen dadurch alle Artikel fehlen, verschwinden.
+Stories, denen dadurch alle Artikel fehlen, verschwinden. Ältere Artikel liefert Miniflux
+nicht mehr, ob es sie noch gibt, lässt sich also nicht prüfen: Sie bleiben bis zur
+Aufbewahrungsgrenze gespeichert, und „Frühere Berichte“ verlinkt sie deshalb auf das Original
+beim Anbieter statt auf Miniflux (ohne gültige URL nur als Text).
 
 **Aufbewahrung:** `storage.retention_days` gilt pro Artikel: Ältere Artikel verlassen ihre
 Story, auch wenn diese weiterläuft; danach werden Stories gelöscht, die so lange nicht mehr

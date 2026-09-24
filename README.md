@@ -91,14 +91,14 @@ Der Python-Service läuft zyklisch (Standard: alle 30 Minuten) und führt folgen
 3. **Vectorization**: TF-IDF über Uni- und Bigramme
 4. **Clustering**: Agglomeratives Clustering (Average Linkage) gruppiert Artikel zum selben Ereignis zu einer *Story*
 5. **Deduplication**: Near-Duplicates (z.B. identische Agenturmeldungen) innerhalb einer Story
-6. **Persistence**: Stories landen in einer lokalen SQLite-Datenbank (`data/intelligence/arsse.db`) mit über Läufe hinweg stabilen IDs; Duplikate werden optional in Miniflux als gelesen markiert. Artikel, die es in Miniflux nicht mehr gibt (z.B. nach „Verlauf leeren“ oder dem Abbestellen eines Feeds), verschwinden beim nächsten Lauf aus ihren Stories. Nach einem Update passt der Service das Schema der Datenbank beim Start selbst an
+6. **Persistence**: Stories landen in einer lokalen SQLite-Datenbank (`data/intelligence/arsse.db`) mit über Läufe hinweg stabilen IDs; Duplikate werden optional in Miniflux als gelesen markiert. Artikel im Zeitfenster, die es in Miniflux nicht mehr gibt (z.B. nach „Verlauf leeren“ oder dem Abbestellen eines Feeds), verschwinden beim nächsten Lauf aus ihren Stories; ältere Artikel unter „Frühere Berichte“ verlinken deshalb auf das Original beim Anbieter. Nach einem Update passt der Service das Schema der Datenbank beim Start selbst an
 
 Die Miniflux-API kann keine Tags oder eigenen Metadaten schreiben – deshalb bringt der Service eine eigene, JavaScript-freie Oberfläche mit:
 
 | Pfad | Inhalt |
 |------|--------|
 | `/` | Top Stories aus mindestens zwei Feeds, gerankt nach Anzahl der Quellen und Aktualität – gezählt wird nur, was im Zeitfenster (24 Stunden) erschienen ist |
-| `/story/<id>` | Alle Artikel einer Story im Zeitfenster, darunter bis zu 20 ältere als „Frühere Berichte“ |
+| `/story/<id>` | Alle Artikel einer Story im Zeitfenster, darunter bis zu 20 ältere als „Frühere Berichte“ (mit Link auf das Original) |
 | `/api/stories` | Dieselben Daten als JSON |
 | `/healthz` | `200`, solange der letzte erfolgreiche Lauf weniger als drei Intervalle zurückliegt |
 

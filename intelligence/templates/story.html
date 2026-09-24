@@ -23,14 +23,17 @@
 
   {% if story.earlier_articles %}
   <h3>Frühere Berichte</h3>
+  {# Only in-window articles are checked against Miniflux: older ones may
+     have been deleted there (flush history, removed feed), so they link to
+     the publisher instead of a possibly dead Miniflux entry #}
   <ul class="coverage">
     {% for a in story.earlier_articles %}
     <li class="{{ 'duplicate' if a.is_duplicate }}">
       <span class="source">{{ a.feed_title }}</span>:
-      <a href="{{ entry_link(a) }}">{{ a.title or '(ohne Titel)' }}</a>
+      {% if safe_url(a.url) %}<a href="{{ safe_url(a.url) }}" rel="noopener noreferrer">{{ a.title or '(ohne Titel)' }}</a>
+      {%- else %}{{ a.title or '(ohne Titel)' }}{% endif %}
       <span class="meta">{{ a.published_at | ago }}</span>
       {% if a.is_duplicate %}<span class="label">Duplikat</span>{% endif %}
-      {% if safe_url(a.url) %}· <a class="meta" href="{{ safe_url(a.url) }}" rel="noopener noreferrer">Original</a>{% endif %}
     </li>
     {% endfor %}
   </ul>

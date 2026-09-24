@@ -392,7 +392,8 @@ class StoryStore:
         Load a story; counts cover only articles published since 'since'.
 
         Older articles that are still attached go to 'earlier_articles'
-        (newest first, at most earlier_max).
+        (newest first, at most earlier_max). Nothing checks whether they
+        still exist in Miniflux (see _prune_deleted).
         """
         all_articles = [dict(a) for a in conn.execute(
             """SELECT e.*, se.is_duplicate FROM story_entries se
@@ -404,8 +405,11 @@ class StoryStore:
         cut = db_timestamp(since)
         articles = [a for a in all_articles if (a['published_at'] or '') >= cut]
         earlier = [a for a in all_articles if (a['published_at'] or '') < cut]
-        headline = next((a for a in articles if a['id'] == row['headline_entry_id']),
-                        articles[0] if articles else None)
+        # The stored headline may have left the window: the newest article
+        # stands in, but not a duplicate that aRSSe marked read in Miniflux
+        headline = next((a for a in articles if a['id'] == row['headline_entry_id']), None) \
+            or next((a for a in articles if not a['is_duplicate']),
+                    articles[0] if articles else None)
         return {
             'id': row['id'],
             'first_seen': row['first_seen'],
@@ -461,7 +465,9 @@ def _prune_deleted(conn: sqlite3.Connection, fetch: FetchResult) -> int:
     date Miniflux filters on, so an article dated after the fetch cutoff
     that is missing from the run must have been returned if it still
     existed. A truncated fetch only holds the newest IDs, so there only
-    IDs from min_id on are checked. Expects the run's IDs in temp.run_ids.
+    IDs from min_id on are checked. Older articles cannot be checked and
+    stay until retention; the story page therefore links them to the
+    publisher, not to Miniflux. Expects the run's IDs in temp.run_ids.
 
     Returns:
         Number of articles removed.
@@ -527,11 +533,15 @@ def _match_story_ids(clusters: list, previous: dict, feed_of: dict,
        ID the user has seen stays on the front page. Without this, a
        hidden single-feed series absorbs a real story whenever the two
        merge for one run, and keeps its ID when they split again;
-    2. they share more articles: the real continuation keeps the ID, not
-       a side topic that took one article along;
-    3. the cluster holds the story's headline article, so on an even
-       split the ID follows the title the user saw;
-    4. the cluster is visible, then larger, then earlier in the list.
+    2. among such pairs, they share more articles: the real continuation
+       keeps the ID, not a side topic that took one article along;
+    3. the story was visible and the cluster holds its headline article.
+       If no visible cluster continues it, the ID stays with the title
+       the user saw rather than going to a larger hidden series, even
+       when the event itself is down to one feed for a run;
+    4. they share more articles, then the cluster holds the headline
+       (so on an even split the ID follows the title the user saw);
+    5. the cluster is visible, then larger, then earlier in the list.
 
     Clusters left without a story get a new ID.
 
@@ -547,8 +557,10 @@ def _match_story_ids(clusters: list, previous: dict, feed_of: dict,
         votes = Counter(story_of[eid] for eid in members if eid in story_of)
         for story_id, overlap in votes.items():
             story = previous[story_id]
-            key = (story.visible and visible, overlap,
-                   story.headline_entry_id in members, visible, len(members), -idx)
+            both = story.visible and visible
+            has_headline = story.headline_entry_id in members
+            key = (both, overlap if both else 0, story.visible and has_headline,
+                   overlap, has_headline, visible, len(members), -idx)
             candidates.append((key, story_id, idx))
     candidates.sort(reverse=True)
 

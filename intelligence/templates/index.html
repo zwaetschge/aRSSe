@@ -27,9 +27,10 @@
     </li>
     {% endfor %}
   </ul>
-  {% if others | length > per_story %}
-  <a class="more" href="/story/{{ story.id }}">Alle {{ story.article_count }} Artikel →</a>
   {% endif %}
+  {% if others | length > per_story or story.earlier_count %}
+  <a class="more" href="/story/{{ story.id }}">Alle {{ story.article_count }} Artikel
+    {%- if story.earlier_count %} · {{ story.earlier_count }} frühere{% endif %} →</a>
   {% endif %}
 </article>
 {% else %}

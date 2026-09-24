@@ -125,6 +125,28 @@ def test_hidden_single_feed_series_never_takes_a_story_id(store):
     assert all(event_ids[0] in ids for ids in shown)
 
 
+def test_hidden_series_does_not_take_the_id_from_a_momentarily_hidden_event(store):
+    # As above, but at the split the event cluster has a single feed for one
+    # run: the cluster with the story's headline wins over the larger overlap
+    event = [entry(1, 1), entry(2, 2)]
+    series = [entry(i, 3) for i in (10, 11, 12, 13)]
+
+    def run(entries, clusters):
+        return store.save_run(entries, clusters, fetch_of(entries), min_sources=2)
+
+    event_id = run(event + series, [cluster([1, 2]), cluster([10, 11, 12, 13])])[0]
+    assert run(event + series, [cluster([1, 2, 10, 11, 12, 13], headline=1)])[0] == event_id
+    split = event + series + [entry(3, 1)]
+    third = run(split, [cluster([10, 11, 12, 13]), cluster([1, 3])])
+    assert third[1] == event_id and third[0] != event_id
+    grown = split + [entry(4, 4)]
+    fourth = run(grown, [cluster([10, 11, 12, 13]), cluster([1, 3, 4])])
+
+    assert fourth[1] == event_id
+    assert members(store, event_id) == [1, 3, 4]
+    assert event_id in {s['id'] for s in store.top_stories(24, 50, min_sources=2)}
+
+
 def test_merged_stories_keep_one_id(store):
     run1 = [entry(i, i % 3 + 1) for i in range(1, 5)]
     first = store.save_run(run1, [cluster([1, 2]), cluster([3, 4])])
@@ -250,6 +272,20 @@ def test_out_of_window_articles_do_not_count(config, store):
     assert only_old in {s['id'] for s in store.top_stories(24, 50, min_sources=1)}
 
 
+def test_headline_fallback_skips_duplicates(store):
+    # The stored headline 1 left the window; the newest article 2 is a
+    # duplicate that aRSSe marked read in Miniflux
+    entries = [entry(1, 1, hours_ago=24 + 1 / 6), entry(2, 2, hours_ago=1),
+               entry(3, 3, hours_ago=2)]
+    story_id = store.save_run(entries, [ClusterResult([1, 2, 3], 1, {2})])[0]
+
+    assert store.top_stories(24, 50, min_sources=2)[0]['headline']['id'] == 3
+    assert store.get_story(story_id, 24)['headline']['id'] == 3
+    # Only duplicates left in the window: the newest one still stands in
+    store.save_run(entries, [ClusterResult([1, 2, 3], 1, {2, 3})])
+    assert store.get_story(story_id, 24)['headline']['id'] == 2
+
+
 def test_story_page_lists_earlier_articles_capped(config, store):
     entries = [entry(1, 1, hours_ago=1), entry(2, 2, hours_ago=2)]
     entries += [entry(i, i % 3 + 1, hours_ago=24 + i) for i in range(10, 16)]
@@ -265,8 +301,39 @@ def test_story_page_lists_earlier_articles_capped(config, store):
         .get_data(as_text=True)
     assert '2 Quellen, 2 Artikel' in html
     assert 'Frühere Berichte' in html
-    assert '/entry/13"' in html and '/entry/14"' not in html
+    assert 'example.org/13"' in html and 'example.org/14"' not in html
     assert 'und 2 ältere' in html
+
+
+def test_earlier_articles_do_not_link_to_miniflux(config, store):
+    # Deletions are only detected inside the window: 'Flush history' also
+    # removes the older, read articles 1 and 2, which stay attached
+    run1 = [entry(1, 1, hours_ago=30), entry(2, 2, hours_ago=28),
+            entry(3, 3, hours_ago=1), entry(4, 4, hours_ago=2)]
+    run1[1]['url'] = 'javascript:alert(1)'
+    story_id = store.save_run(run1, [cluster([1, 2, 3, 4], headline=1)], fetch_of(run1))[0]
+    run2 = [e for e in run1 if e['id'] in (3, 4)]
+    store.save_run(run2, [cluster([3, 4])], fetch_of(run2))
+    assert [a['id'] for a in store.get_story(story_id, 24)['earlier_articles']] == [2, 1]
+
+    html = create_app(config, store).test_client().get(f'/story/{story_id}') \
+        .get_data(as_text=True)
+    assert 'Frühere Berichte' in html
+    assert '/entry/1"' not in html and '/entry/2"' not in html
+    assert '/entry/3"' in html
+    # The publisher's URL instead; plain text when it is not a web link
+    assert 'href="https://example.org/1"' in html
+    assert 'javascript:' not in html and 'Artikel 2' in html
+
+
+def test_front_page_links_stories_with_only_earlier_extra_articles(config, store):
+    entries = [entry(1, 1, hours_ago=1), entry(2, 2, hours_ago=2)]
+    entries += [entry(i, i % 3 + 1, hours_ago=24 + i) for i in range(10, 13)]
+    story_id = store.save_run(entries, [cluster([e['id'] for e in entries])])[0]
+
+    html = create_app(config, store).test_client().get('/').get_data(as_text=True)
+    assert f'href="/story/{story_id}"' in html
+    assert '3 frühere' in html
 
 
 # --- Retention ----------------------------------------------------------------
