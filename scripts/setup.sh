@@ -4,7 +4,9 @@
 # ===========================================
 # Dieses Skript initialisiert die aRSSe-Umgebung auf einem Unraid-Server
 # oder einem anderen Docker-fähigen System. Es kann gefahrlos erneut
-# ausgeführt werden: Eine bestehende .env wird nur ergänzt, nie überschrieben.
+# ausgeführt werden: Eine bestehende .env wird nur ergänzt. Ersetzt werden
+# einzig eine BASE_URL, die noch auf localhost zeigt, und Platzhalter-
+# Passwörter, solange noch keine Datenbank existiert.
 #
 # Aufruf: scripts/setup.sh [--yes] [--no-start]
 #   --yes       Services ohne Rückfrage starten
@@ -34,6 +36,7 @@ START_MODE="ask"
 COMPOSE_CMD="docker compose"
 WAIT_FLAG="--wait"
 ENV_CREATED=0
+ENV_TMP=""
 ADMIN_PASSWORD_NEW=""
 IP=""
 
@@ -101,7 +104,8 @@ admin_user() {
     echo "${name:-admin}"
 }
 
-# KEY=VALUE in .env setzen (zeilengenau) oder anhängen
+# KEY=VALUE in .env setzen (zeilengenau) oder anhängen. ENV_FILE ist
+# dynamisch gebunden: create_env schreibt so in seine temporäre Datei.
 set_env() {
     local key="$1" value="$2" escaped
     escaped=$(printf '%s' "$value" | sed 's/[\\|&]/\\&/g')
@@ -119,6 +123,45 @@ resolve_data_dir() {
     path="${path:-./data}"
     [[ "$path" = /* ]] || path="$PROJECT_DIR/${path#./}"
     echo "$path"
+}
+
+# Host-Port aus MINIFLUX_PORT, auch bei Bindung an eine Adresse
+# (127.0.0.1:8080, wie in docker-compose.yml erlaubt)
+miniflux_port() {
+    local port
+    port=$(env_get MINIFLUX_PORT)
+    port="${port##*:}"
+    echo "${port:-8080}"
+}
+
+# Existiert schon eine Datenbank? Postgres liest POSTGRES_PASSWORD nur beim
+# ersten Start. Nach dem ersten Start gehört das Verzeichnis Postgres
+# (uid 70, Rechte 700): Was nicht lesbar oder nicht leer ist, gilt als
+# bestehende Datenbank.
+database_exists() {
+    local pg="$1/postgresql"
+    [ -d "$pg" ] || return 1
+    [ -f "$pg/PG_VERSION" ] && return 0
+    ls -A "$pg" > /dev/null 2>&1 || return 0
+    [ -n "$(ls -A "$pg" 2>/dev/null)" ]
+}
+
+# Datenpfad einer neuen .env (Unraid: appdata)
+new_env_data_dir() {
+    if [ -d /mnt/user/appdata ] && [ -z "${DATA_PATH:-}" ]; then
+        echo "/mnt/user/appdata/arsse"
+    else
+        resolve_data_dir
+    fi
+}
+
+# Neues Passwort, das sich vom übergebenen unterscheidet (errexit gilt in
+# Befehlssubstitutionen nicht, daher explizit abbrechen)
+gen_distinct_pw() {
+    local pw
+    pw=$(gen_pw) || exit 1
+    while [ "$pw" = "${1:-}" ]; do pw=$(gen_pw) || exit 1; done
+    echo "$pw"
 }
 
 detect_ip() {
@@ -163,26 +206,26 @@ check_requirements() {
 }
 
 create_env() {
-    local data_dir postgres_password
-    data_dir=$(resolve_data_dir)
-    if [ -d /mnt/user/appdata ] && [ -z "${DATA_PATH:-}" ]; then
-        data_dir="/mnt/user/appdata/arsse"
-    fi
+    local data_dir postgres_password target="$ENV_FILE"
+    data_dir=$(new_env_data_dir)
 
-    # Postgres liest POSTGRES_PASSWORD nur beim ersten Start: neue Passwörter
-    # würden nicht mehr zur bestehenden Datenbank passen
-    if [ -f "$data_dir/postgresql/PG_VERSION" ]; then
+    # Neue Passwörter würden nicht mehr zur bestehenden Datenbank passen
+    if database_exists "$data_dir"; then
         print_error "Datenbank existiert bereits – .env aus Backup wiederherstellen"
         print_error "($data_dir/postgresql gehört zu einer früheren .env; neue Passwörter"
         print_error " würden nicht mehr passen. Zum Neubeginn das Verzeichnis löschen.)"
         exit 1
     fi
 
-    cp "$ENV_EXAMPLE" "$ENV_FILE"
-    chmod 600 "$ENV_FILE"
+    # In einer temporären Datei aufbauen: Ein Abbruch hinterlässt keine
+    # .env mit Platzhalter-Passwörtern
+    ENV_TMP=$(mktemp "$PROJECT_DIR/.env.XXXXXX")
+    cp "$ENV_EXAMPLE" "$ENV_TMP"
+    chmod 600 "$ENV_TMP"
+    local ENV_FILE="$ENV_TMP"
 
     postgres_password=$(gen_pw)
-    ADMIN_PASSWORD_NEW=$(gen_pw)
+    ADMIN_PASSWORD_NEW=$(gen_distinct_pw "$postgres_password")
     set_env POSTGRES_PASSWORD "$postgres_password"
     set_env ADMIN_PASSWORD "$ADMIN_PASSWORD_NEW"
 
@@ -196,6 +239,8 @@ create_env() {
         set_env DATA_PATH "$DATA_PATH"
     fi
 
+    mv "$ENV_TMP" "$target"
+    ENV_TMP=""
     ENV_CREATED=1
     print_step ".env erstellt mit sicheren Passwörtern"
 }
@@ -208,9 +253,8 @@ upgrade_env() {
             key="${BASH_REMATCH[1]}"
             # Auch auskommentierte Einträge gelten als bewusste Entscheidung
             if ! grep -qE "^#? *$key=" "$ENV_FILE"; then
-                if [[ "$line" == *"$PLACEHOLDER"* ]]; then
-                    print_warning "$key fehlt in .env – bitte selbst eintragen"
-                else
+                # Fehlende Passwörter übernimmt fill_passwords
+                if [[ "$line" != *"$PLACEHOLDER"* ]]; then
                     if [ $added -eq 0 ]; then
                         [ -z "$(tail -c 1 "$ENV_FILE")" ] || echo "" >> "$ENV_FILE"
                         printf '\n# --- Ergänzt von setup.sh am %s ---\n' "$(date +%F)" >> "$ENV_FILE"
@@ -239,12 +283,55 @@ upgrade_env() {
     [ $added -gt 0 ] || print_step ".env ist aktuell"
 }
 
+# Leere oder Platzhalter-Passwörter einer bestehenden .env ersetzen (z.B.
+# nach 'cp .env.example .env'), solange noch keine Datenbank existiert
+fill_passwords() {
+    local key value password data_dir missing=()
+    for key in POSTGRES_PASSWORD ADMIN_PASSWORD; do
+        value=$(env_get "$key")
+        if [ -z "$value" ] || [ "$value" = "$PLACEHOLDER" ]; then
+            missing+=("$key")
+        fi
+    done
+    [ ${#missing[@]} -gt 0 ] || return 0
+
+    data_dir=$(resolve_data_dir)
+    if database_exists "$data_dir"; then
+        # Miniflux liest ADMIN_PASSWORD nur, solange der Admin noch nicht
+        # existiert: leer ist dann unschädlich, der Platzhalter nicht
+        if [ "${missing[*]}" = ADMIN_PASSWORD ] && [ -z "$(env_get ADMIN_PASSWORD)" ]; then
+            return 0
+        fi
+        print_error "${missing[*]} in .env ist leer oder noch der Platzhalter,"
+        print_error "die Datenbank in $data_dir/postgresql existiert aber schon."
+        print_error "Neue Passwörter würden nicht mehr passen: bitte die bisherigen aus dem"
+        print_error "Backup eintragen (wurde mit dem Platzhalter gestartet: Passwörter ändern)."
+        print_error "Services werden nicht gestartet."
+        exit 1
+    fi
+
+    for key in "${missing[@]}"; do
+        case "$key" in
+            POSTGRES_PASSWORD)
+                password=$(gen_distinct_pw "$(env_get ADMIN_PASSWORD)")
+                set_env "$key" "$password"
+                ;;
+            ADMIN_PASSWORD)
+                ADMIN_PASSWORD_NEW=$(gen_distinct_pw "$(env_get POSTGRES_PASSWORD)")
+                set_env "$key" "$ADMIN_PASSWORD_NEW"
+                ;;
+        esac
+        print_step "$key in .env durch zufälliges Passwort ersetzt"
+    done
+}
+
 setup_environment() {
     echo -e "${BLUE}Konfiguriere Umgebung...${NC}\n"
 
     if [ -f "$ENV_FILE" ]; then
         print_warning ".env existiert bereits, wird nur ergänzt"
         upgrade_env
+        fill_passwords
     else
         create_env
     fi
@@ -258,18 +345,18 @@ setup_environment() {
     # E-Ink-Reader das Gerät selbst
     local base_url port
     base_url=$(env_get BASE_URL)
-    port=$(env_get MINIFLUX_PORT)
+    port=$(miniflux_port)
     detect_ip
     if [ "$ENV_CREATED" -eq 1 ] || [ -z "$base_url" ] || [ "$base_url" = "$DEFAULT_BASE_URL" ]; then
         if [ -n "$IP" ]; then
-            set_env BASE_URL "http://$IP:${port:-8080}"
-            print_step "BASE_URL auf http://$IP:${port:-8080} gesetzt"
+            set_env BASE_URL "http://$IP:$port"
+            print_step "BASE_URL auf http://$IP:$port gesetzt"
         else
             print_warning "IP-Adresse nicht ermittelbar: bitte BASE_URL in .env auf die Adresse setzen, unter der Ihre Geräte Miniflux erreichen"
         fi
     fi
 
-    if [ "$ENV_CREATED" -eq 1 ]; then
+    if [ -n "$ADMIN_PASSWORD_NEW" ]; then
         echo ""
         echo -e "${YELLOW}WICHTIG: Notieren Sie sich diese Zugangsdaten:${NC}"
         echo -e "  Admin-Benutzer: $(admin_user)"
@@ -321,13 +408,8 @@ maybe_start_services() {
         yes) start_services ;;
         no) print_warning "Services nicht gestartet (starten mit: $COMPOSE_CMD up -d db miniflux)"; echo "" ;;
         *)
-            if [[ -t 0 ]]; then
-                read -p "Services jetzt starten? (j/N) " -n 1 -r || REPLY=n
-                echo ""
-            else
-                REPLY=n
-                print_warning "Kein Terminal: Services werden nicht gestartet (--yes erzwingt den Start)"
-            fi
+            read -p "Services jetzt starten? (j/N) " -n 1 -r || REPLY=n
+            echo ""
             if [[ $REPLY =~ ^[Jj]$ ]]; then
                 start_services
             fi
@@ -340,8 +422,7 @@ print_next_steps() {
 
     local host port intelligence_port
     host="${IP:-<server-ip>}"
-    port=$(env_get MINIFLUX_PORT)
-    port="${port:-8080}"
+    port=$(miniflux_port)
     intelligence_port=$(env_get INTELLIGENCE_PORT)
     intelligence_port="${intelligence_port:-8081}"
 
@@ -379,7 +460,14 @@ print_next_steps() {
 # Hauptprogramm
 main() {
     parse_args "$@"
+    trap '[ -z "$ENV_TMP" ] || rm -f "$ENV_TMP"' EXIT
     print_header
+    # Ohne Terminal keine Rückfrage: nicht starten (auch Docker ist dann optional)
+    if [ "$START_MODE" = "ask" ] && [[ ! -t 0 ]]; then
+        START_MODE="no"
+        print_warning "Kein Terminal: Services werden nicht gestartet (--yes erzwingt den Start)"
+        echo ""
+    fi
     check_requirements
     setup_environment
     create_directories

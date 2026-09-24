@@ -4,8 +4,8 @@
 # ===========================================
 # Führt setup.sh in einem temporären Projektverzeichnis mit einem
 # Docker-Stub aus (kein Docker nötig) und prüft die erzeugte .env:
-# Passwörter, Dateirechte, BASE_URL, Wiederholbarkeit und Ergänzung
-# älterer .env-Dateien.
+# Passwörter, Dateirechte, BASE_URL, Wiederholbarkeit, Ergänzung
+# älterer .env-Dateien und den Schutz einer bestehenden Datenbank.
 
 set -euo pipefail
 
@@ -45,6 +45,21 @@ chmod +x "$STUBS"/*
 export DOCKER_LOG="$WORK/docker.log"
 STUB_PATH="$STUBS:$PATH"
 
+# PATH ohne docker: nur die Werkzeuge, die setup.sh braucht
+NODOCKER="$WORK/nodocker"
+mkdir -p "$NODOCKER"
+for tool in bash head base64 tr sed grep cut tail cp mv rm chmod chown mkdir \
+        mktemp ls awk date dirname stat cat printf ip env; do
+    if path=$(command -v "$tool"); then ln -s "$path" "$NODOCKER/$tool"; fi
+done
+ln -s "$STUBS/hostname" "$NODOCKER/hostname"
+
+# base64 schlägt fehl: gen_pw bricht ab
+BROKEN="$WORK/broken"
+mkdir -p "$BROKEN"
+printf '#!/bin/sh\nexit 1\n' > "$BROKEN/base64"
+chmod +x "$BROKEN/base64"
+
 new_project() {
     PROJ="$WORK/$1"
     mkdir -p "$PROJ/scripts"
@@ -61,13 +76,13 @@ run_setup() {
     set -e
 }
 
-env_value() { grep -E "^$1=" "$PROJ/.env" | tail -n 1 | cut -d= -f2-; }
+env_value() { grep -sE "^$1=" "$PROJ/.env" | tail -n 1 | cut -d= -f2- || true; }
 
 check_fresh_env() {
     local printed admin postgres
     [ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS"
     grep -q "Nächste Schritte" <<< "$OUT" || fail "'Nächste Schritte' fehlt"
-    printed=$(grep "Admin-Passwort:" <<< "$OUT" | awk '{print $2}')
+    printed=$(grep "Admin-Passwort:" <<< "$OUT" | awk '{print $2}') || true
     admin=$(env_value ADMIN_PASSWORD)
     postgres=$(env_value POSTGRES_PASSWORD)
     [ "$printed" = "$admin" ] || fail "ausgegebenes Passwort '$printed' != ADMIN_PASSWORD '$admin'"
@@ -110,6 +125,88 @@ run_setup --no-start
 [ "$STATUS" -ne 0 ] || fail "setup.sh hätte abbrechen müssen"
 [ ! -e "$PROJ/.env" ] || fail "neue .env geschrieben"
 grep -q "aus Backup wiederherstellen" <<< "$OUT" || fail "Hinweis auf Backup fehlt"
+
+step "Verlorene .env, Datenbankverzeichnis gehört Postgres (nicht lesbar)"
+# Postgres setzt data/postgresql auf uid 70 und Rechte 700. Root darf
+# trotzdem hineinsehen, daher dort stattdessen ein Verzeichnis ohne PG_VERSION.
+new_project lostdb
+mkdir -p "$PROJ/data/postgresql"
+echo x > "$PROJ/data/postgresql/postmaster.opts"
+if [ "$(id -u)" -ne 0 ]; then
+    chmod 000 "$PROJ/data/postgresql"
+fi
+run_setup --no-start
+chmod 700 "$PROJ/data/postgresql"
+[ "$STATUS" -ne 0 ] || fail "setup.sh hätte abbrechen müssen"
+[ ! -e "$PROJ/.env" ] || fail "neue .env geschrieben"
+! grep -q "Admin-Passwort:" <<< "$OUT" || fail "falsches Passwort ausgegeben"
+
+step "Leeres Datenbankverzeichnis (erster Lauf abgebrochen) gilt nicht als Datenbank"
+rm "$PROJ/data/postgresql/postmaster.opts"
+run_setup --no-start
+check_fresh_env
+
+step "Mit 'cp .env.example .env' angelegte .env: Platzhalter werden ersetzt"
+new_project copied
+cp "$PROJ/.env.example" "$PROJ/.env"
+chmod 600 "$PROJ/.env"
+run_setup --no-start
+check_fresh_env
+
+step "Platzhalter-Passwörter bei bestehender Datenbank: Abbruch, kein Start"
+new_project copieddb
+cp "$PROJ/.env.example" "$PROJ/.env"
+mkdir -p "$PROJ/data/postgresql"
+echo 15 > "$PROJ/data/postgresql/PG_VERSION"
+run_setup --yes
+[ "$STATUS" -ne 0 ] || fail "setup.sh hätte abbrechen müssen"
+! grep -q " up " "$DOCKER_LOG" || fail "Services trotz Platzhalter gestartet"
+[ "$(env_value ADMIN_PASSWORD)" = HIER_SICHERES_PASSWORT_EINTRAGEN ] || fail "ADMIN_PASSWORD verändert"
+
+step "Leeres ADMIN_PASSWORD bei bestehender Datenbank: Admin existiert, kein Abbruch"
+sed -i -e 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=eigenes/' -e 's/^ADMIN_PASSWORD=.*/ADMIN_PASSWORD=/' \
+    "$PROJ/.env"
+run_setup --no-start
+[ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS"
+[ -z "$(env_value ADMIN_PASSWORD)" ] || fail "ADMIN_PASSWORD verändert"
+[ "$(env_value POSTGRES_PASSWORD)" = eigenes ] || fail "POSTGRES_PASSWORD verändert"
+
+step "Nur ADMIN_PASSWORD fehlt: wird erzeugt, POSTGRES_PASSWORD bleibt"
+new_project halfset
+sed -e 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=eigenes/' -e '/^ADMIN_PASSWORD=/d' \
+    "$PROJ/.env.example" > "$PROJ/.env"
+run_setup --no-start
+[ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS"
+[ "$(env_value POSTGRES_PASSWORD)" = eigenes ] || fail "POSTGRES_PASSWORD verändert"
+admin=$(env_value ADMIN_PASSWORD)
+[ "${#admin}" -eq 24 ] || fail "ADMIN_PASSWORD '$admin' nicht erzeugt"
+[ "$(grep "Admin-Passwort:" <<< "$OUT" | awk '{print $2}')" = "$admin" ] \
+    || fail "ausgegebenes Passwort passt nicht zu .env"
+
+step "Abbruch beim Erzeugen der Passwörter hinterlässt keine .env"
+new_project interrupted
+STUB_PATH="$BROKEN:$STUB_PATH" run_setup --no-start
+[ "$STATUS" -ne 0 ] || fail "setup.sh hätte abbrechen müssen"
+[ ! -e "$PROJ/.env" ] || fail ".env mit Platzhaltern hinterlassen"
+[ -z "$(find "$PROJ" -maxdepth 1 -name '.env.?*' ! -name .env.example)" ] \
+    || fail "temporäre Datei hinterlassen"
+run_setup --no-start
+check_fresh_env
+
+step "Ohne Terminal und ohne Docker: .env anlegen, nicht starten"
+new_project nodocker
+STUB_PATH="$NODOCKER" run_setup
+check_fresh_env
+grep -q "Docker ist nicht installiert" <<< "$OUT" || fail "Hinweis auf fehlendes Docker fehlt"
+
+step "MINIFLUX_PORT mit Host-Adresse (127.0.0.1:8090)"
+new_project hostport
+sed 's/^MINIFLUX_PORT=.*/MINIFLUX_PORT=127.0.0.1:8090/' "$PROJ/.env.example" > "$PROJ/.env.example.new"
+mv "$PROJ/.env.example.new" "$PROJ/.env.example"
+run_setup --no-start
+[ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS"
+[ "$(env_value BASE_URL)" = "http://192.0.2.7:8090" ] || fail "BASE_URL ist $(env_value BASE_URL)"
+grep -q "http://192.0.2.7:8090" <<< "$OUT" || fail "Adresse in 'Nächste Schritte' falsch"
 
 step "Ältere .env wird ergänzt, eigene Werte bleiben"
 new_project upgrade

@@ -72,6 +72,26 @@ def test_miniflux_public_port(tmp_path, monkeypatch):
     monkeypatch.setenv('MINIFLUX_PORT', '18080')
     assert load_config(path).miniflux_public_port == 18080
 
+    # Unusable values only affect link fallbacks: warn, keep config.yaml
     monkeypatch.setenv('MINIFLUX_PORT', '0')
-    with pytest.raises(ValueError):
-        load_config(path)
+    assert load_config(path).miniflux_public_port == 8090
+
+
+def test_miniflux_port_with_host_ip_binding(tmp_path, monkeypatch, caplog):
+    # Docker port syntax "127.0.0.1:8080" (Miniflux only on localhost behind
+    # a reverse proxy) must not stop the service; the port is only a fallback
+    monkeypatch.setenv('MINIFLUX_PUBLIC_URL', 'https://news.example.com')
+    monkeypatch.setenv('MINIFLUX_PORT', '127.0.0.1:8090')
+    assert load_config(None).miniflux_public_port == 8090
+
+    monkeypatch.setenv('MINIFLUX_PORT', '[::1]:8091')
+    assert load_config(None).miniflux_public_port == 8091
+
+    monkeypatch.setenv('MINIFLUX_PORT', 'kaputt')
+    with caplog.at_level('WARNING'):
+        assert load_config(None).miniflux_public_port == 8080
+    assert 'MINIFLUX_PORT' in caplog.text
+
+    monkeypatch.delenv('MINIFLUX_PORT')
+    path = write_yaml(tmp_path, 'miniflux:\n  public_port: "127.0.0.1:8092"\n')
+    assert load_config(path).miniflux_public_port == 8092

@@ -165,7 +165,27 @@ def _apply_yaml_config(config: Config, yaml_config: dict) -> None:
     if miniflux := yaml_config.get('miniflux'):
         config.miniflux_url = miniflux.get('url', config.miniflux_url)
         config.miniflux_public_url = miniflux.get('public_url', config.miniflux_public_url)
-        config.miniflux_public_port = int(miniflux.get('public_port', config.miniflux_public_port))
+        config.miniflux_public_port = _parse_port(
+            miniflux.get('public_port'), 'miniflux.public_port', config.miniflux_public_port)
+
+
+def _parse_port(value, name: str, default: int) -> int:
+    """Parse a host port leniently, falling back to ``default``.
+
+    Accepts Docker port syntax with a host address (``127.0.0.1:8080``).
+    The port only matters for links when BASE_URL is a loopback address,
+    so an unusable value is logged instead of stopping the service.
+    """
+    if value is None or value == '':
+        return default
+    try:
+        port = int(str(value).rsplit(':', 1)[-1])
+    except ValueError:
+        port = 0
+    if not 0 < port < 65536:
+        logger.warning("%s=%r is not a TCP port, using %d", name, value, default)
+        return default
+    return port
 
 
 def _env(name: str) -> Optional[str]:
@@ -183,8 +203,8 @@ def _apply_env_config(config: Config) -> None:
         config.miniflux_api_key = api_key
     if public_url := _env('MINIFLUX_PUBLIC_URL'):
         config.miniflux_public_url = public_url
-    if public_port := _env('MINIFLUX_PORT'):
-        config.miniflux_public_port = int(public_port)
+    config.miniflux_public_port = _parse_port(
+        _env('MINIFLUX_PORT'), 'MINIFLUX_PORT', config.miniflux_public_port)
 
     # Clustering
     if threshold := _env('CLUSTERING_THRESHOLD'):
