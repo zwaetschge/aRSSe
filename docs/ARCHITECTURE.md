@@ -72,6 +72,8 @@ aRSSe ist ein selbstgehosteter Nachrichten-Aggregator, der die Kernfunktionalit�
 HTML wird nur bis 200 000 Zeichen geparst, Titel werden auf 500 Zeichen gekürzt. Echte
 Artikel liegen weit darunter; ein defekter oder feindseliger Feed mit mehreren MB pro
 Eintrag kostete sonst bei jedem Lauf Sekunden und Hunderte MB Speicher.
+Eingebettete `data:`-URIs (Miniflux behält z. B. `data:image/*`) werden vorher entfernt:
+Sie enthalten keinen Text, würden die 200 000 Zeichen aber allein füllen.
 
 #### TF-IDF Vektorisierung
 ```python
@@ -140,6 +142,8 @@ nach `published_at` mit `offset` überlappten, sobald viele Artikel dieselbe Zei
 (volle Minuten, Feeds ohne Datum) oder Miniflux während des Abrufs neue Artikel speicherte –
 ein doppelter Artikel ließ jeden Lauf scheitern. Neue Artikel bekommen immer höhere IDs
 und verschieben keine Seite. Greift `max_entries`, bleiben die zuletzt gespeicherten Artikel.
+Liefert eine Seite nur bereits bekannte IDs, ignoriert der Server `before_entry_id`; dann
+bleibt es bei der ersten Seite, und der Abruf gilt (wie bei `max_entries`) als unvollständig.
 
 **Datumsangaben:** `entries.published_at` ist höchstens der Zeitpunkt, zu dem Miniflux den
 Artikel gespeichert hat (`created_at`), bzw. der des ersten Abrufs. Feeds mit falscher

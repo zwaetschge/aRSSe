@@ -45,6 +45,11 @@ MAX_CONTENT_CHARS = 5000
 # several MB would cost seconds and hundreds of MB per run. Real items stay
 # far below (at most 6 KB in the calibration corpus).
 MAX_HTML_CHARS = 200_000
+# Inline data: URIs (Miniflux keeps data:image/*) carry no text but can fill
+# the whole HTML budget and push the article text past MAX_HTML_CHARS. The
+# lookbehind anchors a match at the start of an unbroken run, so every run
+# is scanned once and the pattern stays linear on hostile input.
+_DATA_URI_RE = re.compile(r'(?<![^\s"\'<>()])data:[^\s"\'<>()]{250,}', re.IGNORECASE)
 # First retry delay after a failed cycle; doubles up to the normal interval
 MIN_RETRY_SECONDS = 10
 
@@ -245,10 +250,13 @@ class NewsClusterer:
         # Keyed by ID: an entry must never reach save_run twice
         entries = {}
         before_id = None
-        truncated = False
+        # False once entries of the window may be missing from the result
+        complete = True
         while True:
             if len(entries) >= max_entries:
-                truncated = True
+                complete = False
+                logger.warning("Reached max_entries=%d, older articles are skipped",
+                               max_entries)
                 break
             limit = min(batch_size, max_entries - len(entries))
             params = {}
@@ -267,19 +275,23 @@ class NewsClusterer:
             known = len(entries)
             for entry in batch:
                 entries.setdefault(entry['id'], entry)
-            if len(entries) == known:  # empty page, or a server ignoring before_entry_id
+            if len(entries) == known:
+                if batch:
+                    # With before_entry_id every ID is below all seen ones, so
+                    # a page of known IDs means the server ignored the parameter
+                    complete = False
+                    logger.warning("Miniflux ignored before_entry_id; only the first "
+                                   "page was fetched")
                 break
             before_id = min(entry['id'] for entry in batch)
             # total counts what is left below before_entry_id, this page included
             if len(batch) < limit or len(batch) >= page.get('total', len(batch) + 1):
                 break
 
-        if truncated:
-            logger.warning("Reached max_entries=%d, older articles are skipped", max_entries)
         return FetchResult(
             entries=list(entries.values()),
             cutoff=cutoff,
-            complete=not truncated,
+            complete=complete,
             min_id=min(entries) if entries else None,
             fetched_at=fetched_at,
         )
@@ -292,7 +304,10 @@ class NewsClusterer:
         Stores a plain-text snippet on the entry for the web interface.
         """
         title = (entry.get('title') or '')[:MAX_TITLE_CHARS]
-        content = (entry.get('content') or '')[:MAX_HTML_CHARS]
+        content = entry.get('content') or ''
+        if 'ata:' in content or 'ATA:' in content:  # plain search, much faster than the regex
+            content = _DATA_URI_RE.sub('', content)
+        content = content[:MAX_HTML_CHARS]
 
         if content:
             content = BeautifulSoup(content, 'lxml').get_text(separator=' ')

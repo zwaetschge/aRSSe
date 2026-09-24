@@ -166,6 +166,8 @@ def test_server_ignoring_before_entry_id_does_not_loop(config, store):
     fetch = NewsClusterer(config, store, client=client)._fetch_recent_entries()
     assert len(fetch.entries) == 2
     assert len(client.calls) == 2
+    # Older entries of the window were never fetched: pruning must not trust it
+    assert not fetch.complete and fetch.min_id == 5
 
 
 def test_fetch_respects_max_entries(config, store):
@@ -189,22 +191,39 @@ def test_huge_feed_item_is_cut_before_parsing(config, store):
         from config import Config
         from news_clustering import NewsClusterer
         clusterer = NewsClusterer(Config(), store=None, client=object())
-        entry = {'title': 'Titel ' * 1_000_000,
-                 'content': '<p>' + 'Wort und <b>Satz</b> ' * 750_000 + '</p>'}
-        baseline = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        start = time.perf_counter()
-        text = clusterer._preprocess_entry(entry)
-        elapsed = time.perf_counter() - start
-        growth_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - baseline) / 1024
-        print(elapsed, growth_mb, len(text))
+        # Plain markup, and markup full of short data: runs the URI filter scans
+        for content in ['<p>' + 'Wort und <b>Satz</b> ' * 750_000 + '</p>',
+                        '<p>' + 'metadata:data: ' * 1_000_000 + '</p>']:
+            entry = {'title': 'Titel ' * 1_000_000, 'content': content}
+            baseline = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            start = time.perf_counter()
+            text = clusterer._preprocess_entry(entry)
+            elapsed = time.perf_counter() - start
+            growth_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - baseline) / 1024
+            print(elapsed, growth_mb, len(text))
     ''')
     source = str(Path(__file__).resolve().parent.parent)
     result = subprocess.run([sys.executable, '-c', code, source],
                             capture_output=True, text=True, check=True)
-    elapsed, growth_mb, length = result.stdout.split()
-    assert float(elapsed) < 1.0
-    assert float(growth_mb) < 100
-    assert int(length) < 20_000
+    for line in result.stdout.splitlines():
+        elapsed, growth_mb, length = line.split()
+        assert float(elapsed) < 1.0
+        assert float(growth_mb) < 100
+        assert int(length) < 20_000
+
+
+def test_inline_image_does_not_push_text_past_the_html_cut(config):
+    # Miniflux keeps data:image URIs; a 240 KB one used up the whole HTML
+    # budget and the article was clustered on its title alone
+    image = '<p><img src="data:image/jpeg;base64,' + 'QUJD' * 60_000 + '"></p>'
+    style = '<div style="background:url(DATA:image/png;base64,' + 'A' * 300_000 + ')"></div>'
+    body = '<p>Der Bundestag hat den Bundeshaushalt beschlossen.</p>'
+    clusterer = NewsClusterer(config, store=None, client=object())
+    for content in [image + body, style + body]:
+        entry = {'title': 'Haushalt', 'content': content}
+        text = clusterer._preprocess_entry(entry)
+        assert text == 'haushalt haushalt der bundestag hat den bundeshaushalt beschlossen'
+        assert entry['_snippet'] == 'Der Bundestag hat den Bundeshaushalt beschlossen.'
 
 
 def test_api_failure_is_reported_not_raised(config, store):
