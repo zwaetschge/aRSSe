@@ -30,7 +30,9 @@ cleanup() {
         echo "::endgroup::"
     fi
     compose down -v --remove-orphans > /dev/null 2>&1 || true
-    rm -rf "$WORK"
+    # Postgres data belongs to the container's postgres user, not to us
+    docker run --rm -v "$WORK:/work" alpine:3 rm -rf /work/data > /dev/null 2>&1 || true
+    rm -rf "$WORK" || true
     exit $status
 }
 trap cleanup EXIT
@@ -84,7 +86,11 @@ compose up -d --build --wait --wait-timeout 300 intelligence
 step "Checking results"
 curl -fsS "http://localhost:$IT_PORT/healthz" | json 'd["last_stats"]'
 STORIES=$(curl -fsS "http://localhost:$IT_PORT/api/stories")
-echo "$STORIES" | json '"\n".join(f"    {s[\"source_count\"]} sources: {s[\"headline\"][\"title\"]}" for s in d)'
+echo "$STORIES" | python3 -c '
+import json, sys
+for s in json.load(sys.stdin):
+    print("    %d sources: %s" % (s["source_count"], s["headline"]["title"]))
+'
 
 echo "$STORIES" | python3 -c '
 import json, sys
