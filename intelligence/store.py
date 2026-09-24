@@ -5,7 +5,9 @@ Miniflux cannot store tags or custom metadata via its API, so clustering
 results live in a small SQLite database that the web interface reads.
 
 Story IDs are stable across clustering runs: a new cluster inherits the
-ID of the previous story that shares the most articles with it.
+ID of the previous story it continues (see _match_story_ids). Only
+articles inside the lookback window count for a story's sources and
+rank; older ones stay attached as earlier coverage until retention.
 
 The schema is versioned with ``PRAGMA user_version``; see MIGRATIONS.
 """
@@ -15,7 +17,7 @@ import logging
 import os
 import sqlite3
 import uuid
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -25,6 +27,13 @@ logger = logging.getLogger('arsse-intelligence')
 
 # Feeds are untrusted input; real titles stay far below this
 MAX_TITLE_CHARS = 500
+
+# Default for web.earlier_articles_max: older articles shown on a story page
+EARLIER_ARTICLES_MAX = 20
+
+# Entries dated at most this far past the fetch cutoff are never pruned as
+# deleted: Miniflux filters with a strict '>' on whole seconds
+PRUNE_MARGIN = timedelta(seconds=60)
 
 # Schema of the first release. Databases created before schema versioning
 # (user_version 0 with these tables present) are treated as version 1.
@@ -212,23 +221,26 @@ class StoryStore:
             conn.close()
 
     def save_run(self, entries: list, clusters: list,
-                 fetch: Optional[FetchResult] = None) -> dict:
+                 fetch: Optional[FetchResult] = None, min_sources: int = 1) -> dict:
         """
         Persist the result of a clustering run.
 
         Args:
             entries: Miniflux entry dicts that were part of this run.
             clusters: ClusterResult objects found in this run.
-            fetch: How the entries were fetched; its fetched_at caps
-                future publication dates (defaults to now).
+            fetch: How the entries were fetched. Its fetched_at caps future
+                publication dates (defaults to now); with it, stored
+                articles that Miniflux no longer returns are removed.
+            min_sources: Feeds a story needs to be shown (web.min_sources);
+                story IDs that were visible are kept in preference.
 
         Returns:
             Mapping of cluster index to the story ID it was stored under.
         """
         now = _now()
         fetched_at = fetch.fetched_at if fetch else datetime.now(timezone.utc)
-        run_ids = [e['id'] for e in entries]
-        assigned = {}
+        rows = [_entry_row(e, fetched_at) for e in entries]
+        feed_of = {row['id']: _feed_key(row) for row in rows}
 
         with self._connect() as conn:
             conn.executemany(
@@ -251,25 +263,26 @@ class StoryStore:
                        created_at = excluded.created_at,
                        snippet = excluded.snippet,
                        status = excluded.status""",
-                [_entry_row(e, fetched_at) for e in entries],
+                rows,
             )
 
-            previous = _story_lookup(conn, run_ids)
+            conn.execute("CREATE TEMP TABLE IF NOT EXISTS run_ids (id INTEGER PRIMARY KEY)")
+            conn.execute("DELETE FROM temp.run_ids")
+            conn.executemany("INSERT OR IGNORE INTO temp.run_ids (id) VALUES (?)",
+                             [(row['id'],) for row in rows])
+
+            if fetch is not None:
+                _prune_deleted(conn, fetch)
+
+            previous = _previous_stories(conn, min_sources)
 
             # Articles seen in this run get re-assigned from scratch
-            conn.executemany("DELETE FROM story_entries WHERE entry_id = ?",
-                             [(i,) for i in run_ids])
+            conn.execute("""DELETE FROM story_entries
+                            WHERE entry_id IN (SELECT id FROM temp.run_ids)""")
 
-            # Largest clusters pick their inherited story ID first
-            order = sorted(range(len(clusters)),
-                           key=lambda i: len(clusters[i].entry_ids), reverse=True)
-            claimed = set()
-            for idx in order:
-                cluster = clusters[idx]
-                story_id = _inherit_story_id(cluster.entry_ids, previous, claimed)
-                claimed.add(story_id)
-                assigned[idx] = story_id
-
+            assigned = _match_story_ids(clusters, previous, feed_of, min_sources)
+            for idx, cluster in enumerate(clusters):
+                story_id = assigned[idx]
                 conn.execute(
                     """INSERT INTO stories (id, headline_entry_id, first_seen, last_seen)
                        VALUES (?, ?, ?, ?)
@@ -288,6 +301,7 @@ class StoryStore:
             # Stories that lost all their articles are gone
             conn.execute("""DELETE FROM stories WHERE id NOT IN
                             (SELECT DISTINCT story_id FROM story_entries)""")
+            conn.execute("DROP TABLE temp.run_ids")
 
         return assigned
 
@@ -298,10 +312,20 @@ class StoryStore:
                              [(i,) for i in entry_ids])
 
     def cleanup(self, retention_days: int) -> None:
-        """Remove stories and articles older than the retention period."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+        """
+        Remove articles and stories older than the retention period.
+
+        Retention applies per article: a story that keeps running for weeks
+        loses its old articles, and only then the story itself.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         with self._connect() as conn:
-            conn.execute("DELETE FROM stories WHERE last_seen < ?", (cutoff,))
+            conn.execute("""DELETE FROM story_entries WHERE entry_id IN
+                            (SELECT id FROM entries WHERE published_at < ?)""",
+                         (db_timestamp(cutoff),))
+            conn.execute("DELETE FROM stories WHERE last_seen < ?", (cutoff.isoformat(),))
+            conn.execute("""DELETE FROM stories WHERE id NOT IN
+                            (SELECT DISTINCT story_id FROM story_entries)""")
             conn.execute("""DELETE FROM entries
                             WHERE id NOT IN (SELECT entry_id FROM story_entries)""")
 
@@ -315,50 +339,71 @@ class StoryStore:
             row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return json.loads(row['value']) if row else default
 
-    def top_stories(self, max_age_hours: int, limit: int, min_sources: int = 1) -> list:
+    def top_stories(self, max_age_hours: int, limit: int, min_sources: int = 1,
+                    earlier_max: int = EARLIER_ARTICLES_MAX) -> list:
         """
         Return ranked stories with their articles.
 
-        Ranking favours stories covered by many distinct sources and
-        decays with the age of the newest article.
+        Only articles of the last max_age_hours count: a story needs
+        min_sources feeds among them, and ranking favours stories covered
+        by many distinct sources and decays with the age of the newest
+        article. Older articles are listed in 'earlier_articles'.
         """
-        since = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(hours=max_age_hours)
         with self._connect() as conn:
             # One read snapshot: a run committing in between must not show
             # an article under two stories
             conn.execute("BEGIN")
             story_rows = conn.execute(
-                "SELECT * FROM stories WHERE last_seen >= ?", (since,)
+                "SELECT * FROM stories WHERE last_seen >= ?", (since.isoformat(),)
             ).fetchall()
-            stories = [self._load_story(conn, row) for row in story_rows]
+            stories = [self._load_story(conn, row, since, earlier_max) for row in story_rows]
 
-        now = datetime.now(timezone.utc)
+        stories = [s for s in stories
+                   if s['articles'] and s['source_count'] >= min_sources]
         for story in stories:
-            newest = parse_date(story['articles'][0]['published_at']) if story['articles'] else None
+            newest = parse_date(story['articles'][0]['published_at'])
             age_hours = (now - newest).total_seconds() / 3600 if newest else max_age_hours
             story['score'] = story['source_count'] / (1 + max(age_hours, 0) / 12)
 
-        stories = [s for s in stories if s['source_count'] >= min_sources]
         stories.sort(key=lambda s: s['score'], reverse=True)
         return stories[:limit]
 
-    def get_story(self, story_id: str) -> Optional[dict]:
-        """Return one story, or None if it does not exist (any more)."""
+    def get_story(self, story_id: str, max_age_hours: int,
+                  earlier_max: int = EARLIER_ARTICLES_MAX) -> Optional[dict]:
+        """
+        Return one story, or None if it does not exist (any more).
+
+        Like top_stories, only articles of the last max_age_hours count;
+        a story without any is over and not found.
+        """
+        since = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
         with self._connect() as conn:
             conn.execute("BEGIN")  # story row and articles from one snapshot
             row = conn.execute("SELECT * FROM stories WHERE id = ?", (story_id,)).fetchone()
-            story = self._load_story(conn, row) if row else None
+            story = self._load_story(conn, row, since, earlier_max) if row else None
         return story if story and story['articles'] else None
 
     @staticmethod
-    def _load_story(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
-        articles = [dict(a) for a in conn.execute(
+    def _load_story(conn: sqlite3.Connection, row: sqlite3.Row, since: datetime,
+                    earlier_max: int) -> dict:
+        """
+        Load a story; counts cover only articles published since 'since'.
+
+        Older articles that are still attached go to 'earlier_articles'
+        (newest first, at most earlier_max).
+        """
+        all_articles = [dict(a) for a in conn.execute(
             """SELECT e.*, se.is_duplicate FROM story_entries se
                JOIN entries e ON e.id = se.entry_id
                WHERE se.story_id = ?
-               ORDER BY e.published_at DESC""",
+               ORDER BY e.published_at DESC, e.id DESC""",
             (row['id'],),
         ).fetchall()]
+        cut = db_timestamp(since)
+        articles = [a for a in all_articles if (a['published_at'] or '') >= cut]
+        earlier = [a for a in all_articles if (a['published_at'] or '') < cut]
         headline = next((a for a in articles if a['id'] == row['headline_entry_id']),
                         articles[0] if articles else None)
         return {
@@ -368,8 +413,9 @@ class StoryStore:
             'headline': headline,
             'articles': articles,
             'article_count': len(articles),
-            # Feed IDs, not titles: two subscriptions may share a display name
-            'source_count': len({a['feed_id'] or a['feed_title'] for a in articles}),
+            'source_count': len({_feed_key(a) for a in articles}),
+            'earlier_articles': earlier[:max(earlier_max, 0)],
+            'earlier_count': len(earlier),
         }
 
 
@@ -401,26 +447,121 @@ def _entry_row(entry: dict, fetched_at: datetime) -> dict:
     }
 
 
-def _story_lookup(conn: sqlite3.Connection, entry_ids: list) -> dict:
-    """Map entry ID to its current story ID."""
-    lookup = {}
-    for chunk_start in range(0, len(entry_ids), 500):
-        chunk = entry_ids[chunk_start:chunk_start + 500]
-        placeholders = ','.join('?' * len(chunk))
-        for row in conn.execute(
-                f"SELECT entry_id, story_id FROM story_entries "
-                f"WHERE entry_id IN ({placeholders})", chunk):
-            lookup[row['entry_id']] = row['story_id']
-    return lookup
+def _feed_key(article) -> object:
+    """Identify an article's source by feed ID: two subscriptions may share a title."""
+    return article['feed_id'] or article['feed_title']
 
 
-def _inherit_story_id(entry_ids: list, previous: dict, claimed: set) -> str:
-    """Pick the previous story sharing most articles, or mint a new ID."""
-    votes = Counter(previous[e] for e in entry_ids if e in previous)
-    for story_id, _ in votes.most_common():
-        if story_id not in claimed:
-            return story_id
-    return uuid.uuid4().hex[:12]
+def _prune_deleted(conn: sqlite3.Connection, fetch: FetchResult) -> int:
+    """
+    Remove stored articles that no longer exist in Miniflux.
+
+    Flush history, archiving and removed feeds delete entries in Miniflux;
+    their links would return 404. The stored published_at is at most the
+    date Miniflux filters on, so an article dated after the fetch cutoff
+    that is missing from the run must have been returned if it still
+    existed. A truncated fetch only holds the newest IDs, so there only
+    IDs from min_id on are checked. Expects the run's IDs in temp.run_ids.
+
+    Returns:
+        Number of articles removed.
+    """
+    condition = "published_at > :after AND id NOT IN (SELECT id FROM temp.run_ids)"
+    if not fetch.complete:
+        if fetch.min_id is None:
+            return 0
+        condition += " AND id >= :min_id"
+    params = {'after': db_timestamp(fetch.cutoff + PRUNE_MARGIN), 'min_id': fetch.min_id}
+    conn.execute(f"""DELETE FROM story_entries WHERE entry_id IN
+                     (SELECT id FROM entries WHERE {condition})""", params)
+    removed = conn.execute(f"DELETE FROM entries WHERE {condition}", params).rowcount
+    if removed:
+        logger.info("Removed %d articles that no longer exist in Miniflux", removed)
+    return removed
+
+
+@dataclass
+class _PreviousStory:
+    """A stored story as far as this run's articles are concerned."""
+    entry_ids: set = field(default_factory=set)
+    headline_entry_id: Optional[int] = None
+    feeds: set = field(default_factory=set)
+    visible: bool = False
+
+
+def _previous_stories(conn: sqlite3.Connection, min_sources: int) -> dict:
+    """
+    Map story ID to the stored stories holding articles of this run.
+
+    Only the run's articles (temp.run_ids) are loaded: they are the ones a
+    cluster can share, and they decide whether the story was visible
+    (at least min_sources feeds inside the window).
+    """
+    previous = defaultdict(_PreviousStory)
+    for row in conn.execute(
+            """SELECT se.story_id, se.entry_id, s.headline_entry_id,
+                      e.feed_id, e.feed_title
+               FROM story_entries se
+               JOIN temp.run_ids r ON r.id = se.entry_id
+               JOIN stories s ON s.id = se.story_id
+               JOIN entries e ON e.id = se.entry_id"""):
+        story = previous[row['story_id']]
+        story.entry_ids.add(row['entry_id'])
+        story.headline_entry_id = row['headline_entry_id']
+        story.feeds.add(_feed_key(row))
+    for story in previous.values():
+        story.visible = len(story.feeds) >= min_sources
+    return dict(previous)
+
+
+def _match_story_ids(clusters: list, previous: dict, feed_of: dict,
+                     min_sources: int) -> dict:
+    """
+    Decide which cluster continues which stored story.
+
+    Every pair of cluster and previous story that share articles is
+    ranked, and pairs are taken greedily, best first, while neither side
+    is taken yet. A pair ranks higher, in this order, if:
+
+    1. both the story and the cluster are visible (min_sources feeds): an
+       ID the user has seen stays on the front page. Without this, a
+       hidden single-feed series absorbs a real story whenever the two
+       merge for one run, and keeps its ID when they split again;
+    2. they share more articles: the real continuation keeps the ID, not
+       a side topic that took one article along;
+    3. the cluster holds the story's headline article, so on an even
+       split the ID follows the title the user saw;
+    4. the cluster is visible, then larger, then earlier in the list.
+
+    Clusters left without a story get a new ID.
+
+    Returns:
+        Mapping of cluster index to story ID.
+    """
+    story_of = {eid: sid for sid, story in previous.items() for eid in story.entry_ids}
+    candidates = []
+    for idx, cluster in enumerate(clusters):
+        members = set(cluster.entry_ids)
+        # An article missing from entries counts as a source of its own
+        visible = len({feed_of.get(eid, eid) for eid in members}) >= min_sources
+        votes = Counter(story_of[eid] for eid in members if eid in story_of)
+        for story_id, overlap in votes.items():
+            story = previous[story_id]
+            key = (story.visible and visible, overlap,
+                   story.headline_entry_id in members, visible, len(members), -idx)
+            candidates.append((key, story_id, idx))
+    candidates.sort(reverse=True)
+
+    assigned = {}
+    taken = set()
+    for _, story_id, idx in candidates:
+        if idx not in assigned and story_id not in taken:
+            assigned[idx] = story_id
+            taken.add(story_id)
+    for idx in range(len(clusters)):
+        if idx not in assigned:
+            assigned[idx] = uuid.uuid4().hex[:12]
+    return assigned
 
 
 def _has_table(conn: sqlite3.Connection, name: str) -> bool:

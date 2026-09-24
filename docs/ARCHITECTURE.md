@@ -165,11 +165,46 @@ nächste Lauf holt alles wieder aus Miniflux, nur Story-IDs und „zuerst gesehe
 **Lesen:** Die Weboberfläche liest Story und Artikel in einer Lesetransaktion. Ein Lauf,
 der dazwischen speichert, kann daher keine halbe Story (und keinen Fehler 500) erzeugen.
 
-**Stabile Story-IDs:** Das Clustering nummeriert Cluster bei jedem Lauf neu. Ein neuer Cluster
-übernimmt daher die ID der bisherigen Story, mit der er die meisten Artikel teilt;
-größere Cluster wählen zuerst. Nur wirklich neue Themen bekommen eine neue ID.
+**Stabile Story-IDs:** Das Clustering nummeriert Cluster bei jedem Lauf neu. Jedes Paar
+aus neuem Cluster und bisheriger Story mit gemeinsamen Artikeln wird bewertet, die Paare
+werden vom besten an vergeben, solange weder Cluster noch Story schon vergeben sind:
 
-**Ranking:** `Anzahl Quellen / (1 + Alter des neuesten Artikels in Stunden / 12)`
+1. Story und Cluster sind beide sichtbar (mindestens `web.min_sources` Feeds im Zeitfenster).
+   Eine ID, die auf der Startseite stand, bleibt dort; eine unsichtbare Serie eines einzelnen
+   Feeds kann sie weder übernehmen, wenn beide für einen Lauf verschmelzen, noch behalten,
+   wenn sie sich wieder trennen.
+2. Mehr gemeinsame Artikel: Die eigentliche Fortsetzung behält die ID, nicht ein Nebenthema,
+   das einen Artikel mitgenommen hat.
+3. Der Cluster enthält den bisherigen Schlagzeilen-Artikel – bei einer Teilung in gleich
+   große Hälften folgt die ID also dem Titel, den der Nutzer kannte.
+4. Danach sichtbare vor unsichtbaren, größere vor kleineren Clustern.
+
+Nur Cluster ohne passende Story bekommen eine neue ID. Bei einer Wiederholung des Korpus
+mit 30-Minuten-Läufen (24 h und 6 h Zeitfenster) bekam keine sichtbare beste Fortsetzung
+eine neue ID, während ein Cluster mit weniger gemeinsamen Artikeln die alte behielt.
+
+**Zeitfenster:** Artikel, die aus dem Zeitfenster (`lookback_hours`) gefallen sind, bleiben
+ihrer Story zugeordnet, zählen aber nicht mehr: Quellen- und Artikelzahl, Ranking und
+`web.min_sources` beziehen sich nur auf Artikel im Fenster. Eine Story ohne Artikel im
+Fenster erscheint nicht mehr (auch nicht unter `/story/<id>`). Die Story-Seite listet ältere
+Artikel unter „Frühere Berichte“ (höchstens `web.earlier_articles_max`, Standard 20). Liegt der
+bisherige Schlagzeilen-Artikel außerhalb des Fensters, steht der neueste Artikel oben.
+
+**Gelöschte Artikel:** „Verlauf leeren“ in Miniflux löscht gelesene Artikel – auch die
+Duplikate, die aRSSe selbst als gelesen markiert –, und ein abbestellter Feed nimmt seine
+Artikel mit. Ihre Links führen danach ins Leere (404). War der Abruf vollständig, entfernt
+jeder Lauf daher gespeicherte Artikel, die nach dem Beginn des Zeitfensters (plus 60 s
+Sicherheitsabstand) erschienen sind, aber nicht mehr geliefert wurden: Miniflux hätte sie
+liefern müssen, denn gespeichert ist höchstens das Datum, nach dem Miniflux filtert. War der
+Abruf wegen `max_entries` unvollständig, gilt das nur ab der kleinsten gelieferten Artikel-ID.
+Stories, denen dadurch alle Artikel fehlen, verschwinden.
+
+**Aufbewahrung:** `storage.retention_days` gilt pro Artikel: Ältere Artikel verlassen ihre
+Story, auch wenn diese weiterläuft; danach werden Stories gelöscht, die so lange nicht mehr
+aufgetaucht sind oder keine Artikel mehr haben.
+
+**Ranking:** `Anzahl Quellen / (1 + Alter des neuesten Artikels in Stunden / 12)`, beides
+über die Artikel im Zeitfenster
 
 #### Container-Start
 Docker legt ein fehlendes Bind-Mount-Verzeichnis als root an. Deshalb startet der

@@ -111,7 +111,8 @@ def create_app(config: Config, store: StoryStore) -> Flask:
 
     @app.get('/')
     def index():
-        stories = store.top_stories(max_age_hours, config.web.max_stories, config.web.min_sources)
+        stories = store.top_stories(max_age_hours, config.web.max_stories,
+                                    config.web.min_sources, config.web.earlier_articles_max)
         return render_template(
             'index.html',
             stories=stories,
@@ -121,14 +122,16 @@ def create_app(config: Config, store: StoryStore) -> Flask:
 
     @app.get('/story/<story_id>')
     def story(story_id: str):
-        found = store.get_story(story_id)
+        found = store.get_story(story_id, max_age_hours, config.web.earlier_articles_max)
         if not found:
             abort(404)
         return render_template('story.html', story=found)
 
     @app.get('/api/stories')
     def api_stories():
-        return jsonify(store.top_stories(max_age_hours, config.web.max_stories, config.web.min_sources))
+        return jsonify(store.top_stories(max_age_hours, config.web.max_stories,
+                                         config.web.min_sources,
+                                         config.web.earlier_articles_max))
 
     @app.get('/healthz')
     def healthz():

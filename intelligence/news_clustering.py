@@ -163,7 +163,7 @@ class NewsClusterer:
             stats['clusters_found'] = len(clusters)
             stats['duplicates_detected'] = sum(len(c.duplicate_ids) for c in clusters)
 
-            self.store.save_run(entries, clusters, fetch)
+            self.store.save_run(entries, clusters, fetch, self.config.web.min_sources)
             self.store.cleanup(self.config.storage.retention_days)
 
             if self.config.deduplication.duplicate_action == 'mark_read':

@@ -113,6 +113,8 @@ def test_miniflux_port_with_host_ip_binding(tmp_path, monkeypatch, caplog):
     ('web:\n  articles_per_story: -1\n', 'web.articles_per_story'),
     ('web:\n  max_stories: 0\n', 'web.max_stories'),
     ('web:\n  min_sources: 1.5\n', 'web.min_sources'),
+    ('web:\n  earlier_articles_max: -1\n', 'web.earlier_articles_max'),
+    ('web:\n  earlier_articles_max: "20"\n', 'web.earlier_articles_max'),
     ('miniflux:\n  url: null\n', 'miniflux.url'),
     ('miniflux:\n  url: ""\n', 'miniflux.url'),
     ('miniflux:\n  public_url: null\n', 'miniflux.public_url'),
@@ -133,8 +135,9 @@ def test_limits_themselves_are_accepted(tmp_path, monkeypatch):
         'scheduling:\n  batch_size: 1000\n  max_entries: 5000\n  lookback_hours: 24\n'
         'storage:\n  retention_days: 1\n'
         'clustering:\n  threshold: 0.1\n  max_features: 1\n'
-        'web:\n  articles_per_story: 0\n  max_stories: 1\n')))
+        'web:\n  articles_per_story: 0\n  max_stories: 1\n  earlier_articles_max: 0\n')))
     assert cfg.scheduling.batch_size == 1000
+    assert cfg.web.earlier_articles_max == 0
     assert cfg.clustering.threshold == 0.1
 
 

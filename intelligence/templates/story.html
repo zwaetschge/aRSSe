@@ -20,6 +20,24 @@
     </li>
     {% endfor %}
   </ul>
+
+  {% if story.earlier_articles %}
+  <h3>Frühere Berichte</h3>
+  <ul class="coverage">
+    {% for a in story.earlier_articles %}
+    <li class="{{ 'duplicate' if a.is_duplicate }}">
+      <span class="source">{{ a.feed_title }}</span>:
+      <a href="{{ entry_link(a) }}">{{ a.title or '(ohne Titel)' }}</a>
+      <span class="meta">{{ a.published_at | ago }}</span>
+      {% if a.is_duplicate %}<span class="label">Duplikat</span>{% endif %}
+      {% if safe_url(a.url) %}· <a class="meta" href="{{ safe_url(a.url) }}" rel="noopener noreferrer">Original</a>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% if story.earlier_count > story.earlier_articles | length %}
+  <p class="meta">und {{ story.earlier_count - story.earlier_articles | length }} ältere</p>
+  {% endif %}
+  {% endif %}
 </article>
 <a class="more" href="/">← Zurück zu Top Stories</a>
 {% endblock %}

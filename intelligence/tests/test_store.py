@@ -68,7 +68,9 @@ def test_unversioned_v1_database_is_migrated(tmp_path):
     # The migrated database works for a full run and the web interface
     st.save_run(sample_entries(), budget_clusters())
     assert sorted(len(s['articles']) for s in st.top_stories(24, 50)) == [2, 3]
-    assert st.get_story('oldstory')['articles'][0]['title'] == 'Alt'
+    # Its only article is from January: outside any recent window
+    assert st.get_story('oldstory', 24) is None
+    assert st.get_story('oldstory', 24 * 3650)['articles'][0]['title'] == 'Alt'
 
     # Opening again changes nothing
     StoryStore(path)
@@ -147,16 +149,19 @@ def test_rebuild_is_skipped_for_a_new_database(tmp_path, monkeypatch):
 
 
 def test_dates_are_stored_in_one_comparable_format(store):
+    # An hour ago, written in local time (UTC+2) with microseconds
+    utc = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=123456)
+    raw = utc.astimezone(timezone(timedelta(hours=2))).isoformat()
     entries = sample_entries()
-    entries[0]['published_at'] = '2026-09-24T10:15:30.123456+02:00'
+    entries[0]['published_at'] = raw
     store.save_run(entries, budget_clusters())
 
-    story = store.get_story(store.top_stories(24, 50)[0]['id'])
+    story = store.get_story(store.top_stories(24, 50)[0]['id'], 24)
     for article in story['articles']:
         assert re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00', article['published_at'])
     first = next(a for s in store.top_stories(24, 50) for a in s['articles'] if a['id'] == 1)
-    assert first['published_at'] == '2026-09-24T08:15:30+00:00'
-    assert first['published_at_raw'] == '2026-09-24T10:15:30.123456+02:00'
+    assert first['published_at'] == utc.replace(microsecond=0).isoformat()
+    assert first['published_at_raw'] == raw
     assert db_timestamp(datetime(2026, 1, 1, 12, 0, 0, 999, tzinfo=timezone.utc)) \
         == '2026-01-01T12:00:00+00:00'
 
@@ -216,11 +221,11 @@ def dissolve_during_load(monkeypatch, st, entries):
     load = StoryStore._load_story
     done = []
 
-    def load_after_commit(conn, row):
+    def load_after_commit(conn, row, *args):
         if not done:
             done.append(True)
             st.save_run(entries, [])  # other connection, commits immediately
-        return load(conn, row)
+        return load(conn, row, *args)
     monkeypatch.setattr(StoryStore, '_load_story', staticmethod(load_after_commit))
 
 
@@ -234,7 +239,7 @@ def test_story_page_reads_one_snapshot(config, store, monkeypatch):
     assert response.status_code == 200
     assert 'Bundestag' in response.get_data(as_text=True)
     # The commit happened: the story is gone for the next request
-    assert store.get_story(story_id) is None
+    assert store.get_story(story_id, 24) is None
 
 
 def test_top_stories_read_one_snapshot(store, monkeypatch):
@@ -252,7 +257,7 @@ def test_story_without_articles_is_not_found(config, store):
     conn.commit()
     conn.close()
 
-    assert store.get_story('empty') is None
+    assert store.get_story('empty', 24) is None
     assert create_app(config, store).test_client().get('/story/empty').status_code == 404
 
 

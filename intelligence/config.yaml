@@ -78,7 +78,8 @@ scheduling:
 # Lokale Story-Datenbank (SQLite)
 storage:
   db_path: "/app/data/arsse.db"
-  # Stories, die so lange nicht mehr aufgetaucht sind, werden gelöscht
+  # Artikel, die älter sind, und Stories, die so lange nicht mehr
+  # aufgetaucht sind, werden gelöscht
   # (mindestens 1 und mindestens so lang wie lookback_hours)
   retention_days: 7
 
@@ -90,8 +91,12 @@ web:
   # Weitere Artikel pro Story auf der Startseite (0 = nur die Schlagzeile)
   articles_per_story: 6
   # Nur Stories aus mindestens so vielen Feeds anzeigen
-  # (blendet Werbeblöcke und Serien eines einzelnen Feeds aus)
+  # (blendet Werbeblöcke und Serien eines einzelnen Feeds aus).
+  # Gezählt werden nur Artikel aus dem Zeitfenster (lookback_hours).
   min_sources: 2
+  # Ältere Artikel einer Story (vor dem Zeitfenster), die ihre Seite unter
+  # „Frühere Berichte“ zusätzlich auflistet (0 = keine)
+  earlier_articles_max: 20
 
 # Logging
 logging:

@@ -81,6 +81,8 @@ class WebConfig:
     # Stories covered by fewer feeds are not shown (filters feed-internal
     # series and advertising that only resemble each other)
     min_sources: int = 2
+    # Articles older than the lookback window listed on a story page
+    earlier_articles_max: int = 20
 
 
 @dataclass
@@ -262,6 +264,7 @@ _NUMERIC_FIELDS = (
     ('web.max_stories', ('web', 'max_stories'), True),
     ('web.articles_per_story', ('web', 'articles_per_story'), True),
     ('web.min_sources', ('web', 'min_sources'), True),
+    ('web.earlier_articles_max', ('web', 'earlier_articles_max'), True),
 )
 
 
@@ -313,6 +316,8 @@ def _validate(config: Config) -> None:
         raise ConfigError("web.max_stories must be at least 1")
     if config.web.articles_per_story < 0:
         raise ConfigError("web.articles_per_story must not be negative")
+    if config.web.earlier_articles_max < 0:
+        raise ConfigError("web.earlier_articles_max must not be negative")
 
     scheduling = config.scheduling
     if scheduling.interval_minutes < 1:
