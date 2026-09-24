@@ -11,13 +11,13 @@ aRSSe ist ein selbstgehosteter Nachrichten-Aggregator, der die Kernfunktionalit�
 └─────────────────────────────────────────────────────────────┘
                               │
 ┌─────────────────────────────────────────────────────────────┐
-│                 Presentation Layer (WebApp)                  │
-│              E-Ink optimiertes CSS, PWA                      │
+│                 Presentation Layer                           │
+│      Top-Stories-Seite (Flask) + Miniflux-Custom-CSS        │
 └─────────────────────────────────────────────────────────────┘
                               │
 ┌─────────────────────────────────────────────────────────────┐
 │               Intelligence Layer (Python)                    │
-│        TF-IDF, DBSCAN Clustering, Deduplizierung            │
+│   TF-IDF, DBSCAN, Deduplizierung, SQLite-Story-Speicher     │
 └─────────────────────────────────────────────────────────────┘
                               │
 ┌─────────────────────────────────────────────────────────────┐
@@ -64,7 +64,7 @@ aRSSe ist ein selbstgehosteter Nachrichten-Aggregator, der die Kernfunktionalit�
 
 ### 3. Intelligence Layer (Python)
 
-**Technologie:** Python 3.11, Scikit-Learn, NLTK
+**Technologie:** Python 3.11, Scikit-Learn, NLTK, SQLite, Flask/Waitress
 
 **Algorithmen:**
 
@@ -72,8 +72,10 @@ aRSSe ist ein selbstgehosteter Nachrichten-Aggregator, der die Kernfunktionalit�
 ```python
 TfidfVectorizer(
     max_features=5000,
-    stop_words='german',
-    ngram_range=(1, 2)
+    tokenizer=tokenize,   # NLTK-Stopwords + Snowball-Stemmer (deutsch)
+    ngram_range=(1, 2),
+    min_df=2,
+    sublinear_tf=True
 )
 ```
 
@@ -87,23 +89,45 @@ DBSCAN(
 ```
 
 #### Deduplizierung
-- Paarweise Cosine Similarity innerhalb Clusters
+- Paarweise Cosine Similarity innerhalb einer Story
+- Eigene Term-Frequenz-Vektoren über das volle Vokabular: Das Clustering verwirft seltene Terme (`min_df`), und genau diese unterscheiden zwei Berichte zum selben Thema
 - Schwellenwert: 0.85 (konfigurierbar)
-- Kanonisierung: längster/priorisierter Artikel
+- Kanonisierung: längster, priorisierter oder neuester Artikel
+- Duplikate werden optional per `PUT /v1/entries` in Miniflux als gelesen markiert
+
+#### Story-Speicher
+Die Miniflux-API kann Einträge nur in Titel, Inhalt und Status ändern – Tags oder
+eigene Metadaten lassen sich nicht zurückschreiben. Stories liegen deshalb in einer
+SQLite-Datenbank im Datenverzeichnis des Containers:
+
+| Tabelle | Inhalt |
+|---------|--------|
+| `entries` | Kopie der Artikel-Metadaten (Titel, Feed, URL, Snippet) |
+| `stories` | Story-ID, Schlagzeilen-Artikel, erstmals/zuletzt gesehen |
+| `story_entries` | Zuordnung Artikel → Story, Duplikat-Flag |
+| `meta` | Zeitpunkt und Statistik des letzten Laufs |
+
+**Stabile Story-IDs:** DBSCAN nummeriert Cluster bei jedem Lauf neu. Ein neuer Cluster
+übernimmt daher die ID der bisherigen Story, mit der er die meisten Artikel teilt;
+größere Cluster wählen zuerst. Nur wirklich neue Themen bekommen eine neue ID.
+
+**Ranking:** `Anzahl Quellen / (1 + Alter des neuesten Artikels in Stunden / 12)`
 
 ### 4. Presentation Layer
 
-**Technologie:** HTML5, CSS3
+**Top Stories (Port 8081):** Server-seitig gerenderte Seiten ohne JavaScript und ohne
+externe Ressourcen – funktioniert auf E-Ink-Readern ebenso wie im Desktop-Browser,
+Dark Mode über `prefers-color-scheme`.
+
+**Miniflux-Themes:** `css/eink-theme.css` und `css/color-theme.css` als
+benutzerdefiniertes CSS. Miniflux liefert Manifest und Service Worker selbst mit,
+die PWA-Installation läuft über Miniflux.
 
 **E-Ink-Optimierung:**
 - Keine Animationen/Transitions
 - Hoher Kontrast (Schwarz/Weiß)
 - Serifen-Typografie
-- Große Touch-Targets (min. 48px)
-
-**PWA-Funktionen:**
-- Manifest für Homescreen-Installation
-- Service Worker für UI-Caching
+- Große Touch-Targets (min. 44px)
 
 ### 5. Access Layer
 
@@ -146,15 +170,15 @@ DBSCAN(
 │                                        │               │
 │                                        ▼               │
 │                              ┌─────────────────┐       │
-│                              │   Tag/Update    │       │
+│                              │ SQLite + Status │       │
 │                              └─────────────────┘       │
 └────────────────────────────────────────────────────────┘
                             │
                             ▼
 ┌────────────────────────────────────────────────────────┐
-│                   E-Ink WebApp                          │
+│               Top Stories (Port 8081)                   │
 │  ┌────────────────────────────────────────────────┐   │
-│  │         Clustered, Deduplicated Feed           │   │
+│  │         Clustered, Deduplicated Stories        │   │
 │  └────────────────────────────────────────────────┘   │
 └────────────────────────────────────────────────────────┘
 ```
@@ -166,8 +190,8 @@ DBSCAN(
 | Ingestion | Web Crawling | RSS/Atom Feeds |
 | Clustering | Transformer/BERT | TF-IDF + DBSCAN |
 | Deduplizierung | SimHash | Cosine Similarity |
-| Ranking | ML + Nutzerverhalten | Konfigurierbare Scores |
-| Personalisierung | Deep Learning | Tag-basiert |
+| Ranking | ML + Nutzerverhalten | Quellenanzahl + Aktualität |
+| Personalisierung | Deep Learning | Feed-Auswahl, Quellen-Scores |
 | Skalierung | Global | Lokal (< 100k Artikel) |
 
 ## Erweiterungsmöglichkeiten

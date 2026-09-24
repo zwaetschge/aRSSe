@@ -1,11 +1,9 @@
-version: '3.8'
-
 services:
   # ============================================
   # Miniflux - RSS Aggregator (Ingestion Layer)
   # ============================================
   miniflux:
-    image: miniflux/miniflux:latest
+    image: miniflux/miniflux:2.3.3
     container_name: arsse-miniflux
     ports:
       - "${MINIFLUX_PORT:-8080}:8080"
@@ -84,14 +82,21 @@ services:
       context: ./intelligence
       dockerfile: Dockerfile
     container_name: arsse-intelligence
+    # Muss Schreibrechte auf ${DATA_PATH}/intelligence haben (Unraid: 99:100)
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "${INTELLIGENCE_PORT:-8081}:8081"
     environment:
       - MINIFLUX_URL=http://miniflux:8080
       - MINIFLUX_API_KEY=${MINIFLUX_API_KEY}
-      - CLUSTERING_INTERVAL=${CLUSTERING_INTERVAL:-30}
-      - CLUSTERING_EPS=${CLUSTERING_EPS:-0.4}
-      - CLUSTERING_MIN_SAMPLES=${CLUSTERING_MIN_SAMPLES:-2}
-      - DEDUP_THRESHOLD=${DEDUP_THRESHOLD:-0.85}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - MINIFLUX_PUBLIC_URL=${BASE_URL:-}
+      # Leer = Wert aus intelligence/config.yaml
+      - CLUSTERING_INTERVAL=${CLUSTERING_INTERVAL:-}
+      - CLUSTERING_EPS=${CLUSTERING_EPS:-}
+      - CLUSTERING_MIN_SAMPLES=${CLUSTERING_MIN_SAMPLES:-}
+      - DEDUP_THRESHOLD=${DEDUP_THRESHOLD:-}
+      - DEDUP_ACTION=${DEDUP_ACTION:-}
+      - LOG_LEVEL=${LOG_LEVEL:-}
       - TZ=${TZ:-Europe/Berlin}
     volumes:
       - ${DATA_PATH:-./data}/intelligence:/app/data

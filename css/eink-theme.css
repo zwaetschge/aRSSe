@@ -841,20 +841,6 @@ aside h3 {
     transform: rotate(1deg);
 }
 
-/* Story cluster tags */
-.tag[data-tag^="story_"],
-.entry-tag[data-tag^="story_"] {
-    background: var(--paper-aged);
-    border-width: 3px;
-}
-
-/* Duplicate tag - crossed out */
-.tag[data-tag="duplicate"],
-.entry-tag[data-tag="duplicate"] {
-    opacity: 0.4;
-    text-decoration: line-through;
-}
-
 /* ===========================================
    ARTICLE ACTIONS
    =========================================== */

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="status">
+  {% if last_success %}Aktualisiert {{ last_success | ago }}{% else %}Noch kein Clustering-Lauf abgeschlossen{% endif %}
+  · {{ stories | length }} Stories
+</p>
+
+{% for story in stories %}
+{% set head = story.headline %}
+<article class="story">
+  <h2><a href="{{ entry_link(head) }}">{{ head.title }}</a></h2>
+  <div class="meta">
+    <span class="source">{{ head.feed_title }}</span> · {{ head.published_at | ago }}
+    · {{ story.source_count }} Quellen, {{ story.article_count }} Artikel
+  </div>
+  {% if head.snippet %}<p class="snippet">{{ head.snippet }}</p>{% endif %}
+
+  {% set others = story.articles | rejectattr('id', 'equalto', head.id) | list %}
+  {% if others %}
+  <ul class="coverage">
+    {% for a in others[:per_story] %}
+    <li class="{{ 'duplicate' if a.is_duplicate }}">
+      <span class="source">{{ a.feed_title }}</span>:
+      <a href="{{ entry_link(a) }}">{{ a.title }}</a>
+      <span class="meta">{{ a.published_at | ago }}</span>
+      {% if a.is_duplicate %}<span class="label">Duplikat</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% if others | length > per_story %}
+  <a class="more" href="/story/{{ story.id }}">Alle {{ story.article_count }} Artikel →</a>
+  {% endif %}
+  {% endif %}
+</article>
+{% else %}
+<p class="empty">Noch keine Stories. Sobald mehrere Quellen über dasselbe Thema berichten, erscheinen sie hier.</p>
+{% endfor %}
+{% endblock %}

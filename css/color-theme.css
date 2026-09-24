@@ -980,20 +980,6 @@ aside h3 {
     color: var(--aurora-cyan);
 }
 
-/* Story cluster tags - accent color */
-.tag[data-tag^="story_"],
-.entry-tag[data-tag^="story_"] {
-    border-color: var(--aurora-violet);
-    color: var(--aurora-violet);
-}
-
-/* Duplicate tag */
-.tag[data-tag="duplicate"],
-.entry-tag[data-tag="duplicate"] {
-    opacity: 0.4;
-    text-decoration: line-through;
-}
-
 /* ===========================================
    ARTICLE ACTIONS
    =========================================== */
