@@ -93,7 +93,8 @@ check_fresh_env() {
     [ "$(stat -c %a "$PROJ/.env")" = 600 ] || fail ".env hat Rechte $(stat -c %a "$PROJ/.env")"
     [ "$(env_value BASE_URL)" = "http://192.0.2.7:8080" ] || fail "BASE_URL ist $(env_value BASE_URL)"
     grep -q "Admin-Benutzer: admin" <<< "$OUT" || fail "Admin-Benutzer fehlt"
-    [ -d "$PROJ/data/postgresql" ] && [ -d "$PROJ/data/intelligence" ] || fail "Datenverzeichnisse fehlen"
+    [ -d "$PROJ/data/postgresql" ] || fail "Datenverzeichnis postgresql fehlt"
+    [ -d "$PROJ/data/intelligence" ] || fail "Datenverzeichnis intelligence fehlt"
     ! grep -q " up " "$DOCKER_LOG" || fail "Services wurden ohne --yes gestartet"
 }
 
