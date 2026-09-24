@@ -75,8 +75,10 @@ def create_app(config: Config, store: StoryStore) -> Flask:
         # Miniflux itself speaks plain HTTP on MINIFLUX_PORT
         return f"http://{host}:{config.miniflux_public_port}{base_path}"
 
-    def entry_link(article: dict) -> str:
+    def entry_link(article: Optional[dict]) -> str:
         """Link to the article inside Miniflux (works for read and unread)."""
+        if not article:
+            return miniflux_base()
         if article.get('feed_id'):
             return f"{miniflux_base()}/feed/{article['feed_id']}/entry/{article['id']}"
         return safe_url(article.get('url')) or miniflux_base()
@@ -93,6 +95,8 @@ def create_app(config: Config, store: StoryStore) -> Flask:
         if not parsed:
             return ''
         minutes = int((datetime.now(timezone.utc) - parsed).total_seconds() // 60)
+        if minutes < 0:
+            return ''  # dated in the future: no claim is better than a wrong one
         if minutes < 1:
             return 'gerade eben'
         if minutes < 60:

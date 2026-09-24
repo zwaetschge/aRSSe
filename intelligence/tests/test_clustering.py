@@ -1,3 +1,9 @@
+import subprocess
+import sys
+import textwrap
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
 import miniflux
 
 from conftest import BUDGET, FakeClient, make_entry, sample_entries
@@ -62,9 +68,104 @@ def test_fetch_paginates_and_filters_server_side(config, store):
     config.scheduling.batch_size = 2
     clusterer, client, _ = run(config, store, sample_entries())
 
-    assert [c['offset'] for c in client.calls] == [0, 2, 4]
+    # Keyset paging: newest IDs first, then below the smallest ID seen
+    assert [c['before_entry_id'] for c in client.calls] == [None, 5, 3]
+    assert all(c['order'] == 'id' and c['direction'] == 'desc' for c in client.calls)
+    assert all(c['offset'] == 0 for c in client.calls)
     assert all(c['published_after'] for c in client.calls)
     assert all(c['status'] == ['unread', 'read'] for c in client.calls)
+
+
+def test_fetch_result_describes_the_fetch(config, store):
+    config.scheduling.batch_size = 4
+    clusterer = NewsClusterer(config, store, client=FakeClient(sample_entries()))
+    before = datetime.now(timezone.utc)
+    fetch = clusterer._fetch_recent_entries()
+
+    assert sorted(e['id'] for e in fetch.entries) == [1, 2, 3, 4, 5, 6]
+    assert fetch.complete and fetch.min_id == 1
+    assert before <= fetch.fetched_at <= datetime.now(timezone.utc)
+    assert fetch.fetched_at - fetch.cutoff == timedelta(hours=24)
+
+
+def test_entry_stored_while_paging_is_fetched_once(config, store):
+    # Offset paging fetched [1,2,3,3,4,5,6] when an entry arrived between
+    # two pages, and save_run then failed with a UNIQUE violation
+    config.scheduling.batch_size = 2
+    client = FakeClient(sample_entries())
+
+    def new_entry_arrives(page):
+        if page == 1:
+            client.entries.append(make_entry(7, 4, 'Bundestag: Haushalt beschlossen',
+                                             'Der Bundestag beschließt den Haushalt.'))
+    client.after_page = new_entry_arrives
+    saved = []
+    save_run = store.save_run
+    store.save_run = lambda entries, *args: saved.append(
+        [e['id'] for e in entries]) or save_run(entries, *args)
+    stats = NewsClusterer(config, store, client=client).run_clustering_cycle()
+
+    assert stats['errors'] == 0
+    # Every ID exactly once; entry 7 follows in the next run
+    assert sorted(saved[0]) == [1, 2, 3, 4, 5, 6]
+    assert story_members(store) == [[1, 2, 3], [4, 5]]
+
+
+def test_entry_repeated_on_two_pages_does_not_break_the_run(config, store):
+    class RepeatingClient(FakeClient):
+        """Returns the last entry of every page again on the next page."""
+
+        def get_entries(self, **kwargs):
+            page = super().get_entries(**kwargs)
+            if kwargs.get('before_entry_id') and page['entries']:
+                previous = next(e for e in self.entries
+                                if e['id'] == kwargs['before_entry_id'])
+                page['entries'].insert(0, dict(previous))
+            return page
+
+    config.scheduling.batch_size = 2
+    client = RepeatingClient(sample_entries())
+    clusterer = NewsClusterer(config, store, client=client)
+    fetch = clusterer._fetch_recent_entries()
+    assert sorted(e['id'] for e in fetch.entries) == [1, 2, 3, 4, 5, 6]
+
+    stats = clusterer.run_clustering_cycle()
+    assert stats['errors'] == 0
+    assert story_members(store) == [[1, 2, 3], [4, 5]]
+
+
+def test_tied_publication_dates_do_not_repeat_entries(config, store):
+    # Many entries share one published_at (whole minutes, feeds without
+    # dates). Postgres returns ties in any order, and the order changed with
+    # LIMIT/OFFSET, so offset pages overlapped. Paging by ID is immune.
+    class PostgresLikeClient(FakeClient):
+        def get_entries(self, **kwargs):
+            if len(self.calls) % 2:
+                self.entries.reverse()  # another plan, another tie order
+            return super().get_entries(**kwargs)
+
+    config.scheduling.batch_size = 3
+    entries = sample_entries()
+    for e in entries:
+        e['published_at'] = entries[0]['published_at']
+    client = PostgresLikeClient(entries)
+    stats = NewsClusterer(config, store, client=client).run_clustering_cycle()
+
+    assert stats['errors'] == 0
+    assert stats['articles_processed'] == 6
+    assert story_members(store) == [[1, 2, 3], [4, 5]]
+
+
+def test_server_ignoring_before_entry_id_does_not_loop(config, store):
+    class OldServer(FakeClient):
+        def get_entries(self, *, before_entry_id=None, **kwargs):
+            return super().get_entries(**kwargs)
+
+    config.scheduling.batch_size = 2
+    client = OldServer(sample_entries())
+    fetch = NewsClusterer(config, store, client=client)._fetch_recent_entries()
+    assert len(fetch.entries) == 2
+    assert len(client.calls) == 2
 
 
 def test_fetch_respects_max_entries(config, store):
@@ -73,6 +174,37 @@ def test_fetch_respects_max_entries(config, store):
     clusterer, client, stats = run(config, store, sample_entries())
 
     assert stats['articles_processed'] == 3
+    assert [c['limit'] for c in client.calls] == [2, 1]
+    fetch = clusterer._fetch_recent_entries()
+    # Keyset paging keeps the most recently stored entries
+    assert sorted(e['id'] for e in fetch.entries) == [4, 5, 6]
+    assert not fetch.complete and fetch.min_id == 4
+
+
+def test_huge_feed_item_is_cut_before_parsing(config, store):
+    # A 15 MB item (Miniflux's default body limit) took 5.9 s and ~600 MB RSS
+    code = textwrap.dedent('''
+        import resource, sys, time
+        sys.path.insert(0, sys.argv[1])
+        from config import Config
+        from news_clustering import NewsClusterer
+        clusterer = NewsClusterer(Config(), store=None, client=object())
+        entry = {'title': 'Titel ' * 1_000_000,
+                 'content': '<p>' + 'Wort und <b>Satz</b> ' * 750_000 + '</p>'}
+        baseline = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        start = time.perf_counter()
+        text = clusterer._preprocess_entry(entry)
+        elapsed = time.perf_counter() - start
+        growth_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - baseline) / 1024
+        print(elapsed, growth_mb, len(text))
+    ''')
+    source = str(Path(__file__).resolve().parent.parent)
+    result = subprocess.run([sys.executable, '-c', code, source],
+                            capture_output=True, text=True, check=True)
+    elapsed, growth_mb, length = result.stdout.split()
+    assert float(elapsed) < 1.0
+    assert float(growth_mb) < 100
+    assert int(length) < 20_000
 
 
 def test_api_failure_is_reported_not_raised(config, store):

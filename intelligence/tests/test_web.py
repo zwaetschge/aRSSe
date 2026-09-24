@@ -133,3 +133,22 @@ def test_is_loopback_url():
         assert is_loopback_url(url), url
     for url in ('http://192.168.1.10:8080', 'https://news.example.com', 'http://[fd00::1]'):
         assert not is_loopback_url(url), url
+
+
+def test_ago_never_claims_future_dates_are_recent(config, store):
+    from datetime import datetime, timedelta, timezone
+    ago = create_app(config, store).jinja_env.filters['ago']
+    now = datetime.now(timezone.utc)
+    assert ago((now + timedelta(hours=36)).isoformat()) == ''
+    assert ago((now - timedelta(seconds=10)).isoformat()) == 'gerade eben'
+    assert ago((now - timedelta(minutes=5)).isoformat()) == 'vor 5 Min.'
+
+
+def test_entry_link_without_article_points_to_miniflux(config, store):
+    config.miniflux_public_url = 'https://news.example.com/'
+    app = create_app(config, store)
+    with app.test_request_context('/'):
+        helpers = {}
+        for processor in app.template_context_processors[None]:
+            helpers.update(processor())
+        assert helpers['entry_link'](None) == 'https://news.example.com'

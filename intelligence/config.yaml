@@ -3,6 +3,8 @@
 # ===========================================
 # Reihenfolge: Defaults < diese Datei < Umgebungsvariablen (.env).
 # Leere Umgebungsvariablen werden ignoriert.
+# Zahlen ohne Anführungszeichen angeben. Ungültige Werte verhindern den Start;
+# die Meldung im Log nennt die betroffene Einstellung.
 
 # Miniflux-Verbindung
 miniflux:
@@ -63,19 +65,21 @@ scheduling:
   # Intervall zwischen Clustering-Läufen (Minuten)
   interval_minutes: 30
 
-  # Artikel pro API-Anfrage
+  # Artikel pro API-Anfrage (1-1000, mehr lehnt Miniflux ab)
   batch_size: 250
 
-  # Maximale Anzahl Artikel pro Durchlauf
+  # Maximale Anzahl Artikel pro Durchlauf (1-5000; Rechenzeit und Speicher
+  # wachsen quadratisch). Wird die Grenze erreicht, fehlen die ältesten Artikel.
   max_entries: 2000
 
-  # Zeitfenster für Artikel-Analyse (Stunden)
+  # Zeitfenster für Artikel-Analyse (Stunden, mindestens 1)
   lookback_hours: 24
 
 # Lokale Story-Datenbank (SQLite)
 storage:
   db_path: "/app/data/arsse.db"
   # Stories, die so lange nicht mehr aufgetaucht sind, werden gelöscht
+  # (mindestens 1 und mindestens so lang wie lookback_hours)
   retention_days: 7
 
 # Top-Stories-Weboberfläche
@@ -83,7 +87,7 @@ web:
   # Der Port ist fest 8081 im Container; extern über INTELLIGENCE_PORT in .env
   # Maximale Anzahl angezeigter Stories
   max_stories: 50
-  # Weitere Artikel pro Story auf der Startseite
+  # Weitere Artikel pro Story auf der Startseite (0 = nur die Schlagzeile)
   articles_per_story: 6
   # Nur Stories aus mindestens so vielen Feeds anzeigen
   # (blendet Werbeblöcke und Serien eines einzelnen Feeds aus)

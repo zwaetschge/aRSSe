@@ -60,7 +60,7 @@ def main():
     random.seed(args.seed)
 
     clusterer = NewsClusterer(config, _NoStore())
-    entries = clusterer._fetch_recent_entries()
+    entries = clusterer._fetch_recent_entries().entries
     if len(entries) < 2:
         sys.exit(f"Only {len(entries)} articles in the last "
                  f"{config.scheduling.lookback_hours}h, nothing to compare.")

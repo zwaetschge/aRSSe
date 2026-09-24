@@ -68,6 +68,11 @@ aRSSe ist ein selbstgehosteter Nachrichten-Aggregator, der die Kernfunktionalit�
 
 **Algorithmen:**
 
+#### Vorverarbeitung
+HTML wird nur bis 200 000 Zeichen geparst, Titel werden auf 500 Zeichen gekürzt. Echte
+Artikel liegen weit darunter; ein defekter oder feindseliger Feed mit mehreren MB pro
+Eintrag kostete sonst bei jedem Lauf Sekunden und Hunderte MB Speicher.
+
 #### TF-IDF Vektorisierung
 ```python
 TfidfVectorizer(
@@ -128,6 +133,33 @@ SQLite-Datenbank im Datenverzeichnis des Containers:
 | `stories` | Story-ID, Schlagzeilen-Artikel, erstmals/zuletzt gesehen |
 | `story_entries` | Zuordnung Artikel → Story, Duplikat-Flag |
 | `meta` | Zeitpunkt und Statistik des letzten Laufs |
+
+**Abruf:** Die Artikel des Zeitfensters kommen seitenweise nach Artikel-ID absteigend
+(`order=id`, ab der zweiten Seite `before_entry_id` = kleinste ID der Vorseite). Seiten
+nach `published_at` mit `offset` überlappten, sobald viele Artikel dieselbe Zeit tragen
+(volle Minuten, Feeds ohne Datum) oder Miniflux während des Abrufs neue Artikel speicherte –
+ein doppelter Artikel ließ jeden Lauf scheitern. Neue Artikel bekommen immer höhere IDs
+und verschieben keine Seite. Greift `max_entries`, bleiben die zuletzt gespeicherten Artikel.
+
+**Datumsangaben:** `entries.published_at` ist höchstens der Zeitpunkt, zu dem Miniflux den
+Artikel gespeichert hat (`created_at`), bzw. der des ersten Abrufs. Feeds mit falscher
+Zeitzone oder vorausdatierten Einträgen würden sonst nie altern und ihre Story tagelang
+oben halten. Das Datum des Feeds steht unverändert in `published_at_raw`. Gespeichert wird
+immer in UTC mit ganzen Sekunden (`2026-09-24T08:15:00+00:00`), damit SQL die Werte als
+Text vergleichen kann.
+
+**Schema-Versionen:** `PRAGMA user_version` hält die Schema-Version. `store.MIGRATIONS`
+ist eine nur wachsende Liste; Eintrag *i* hebt Version *i* auf *i + 1*. Beim Start laufen
+alle fehlenden Migrationen samt Versionswechsel in einer Transaktion – schlägt eine fehl,
+bleibt die Datenbank unverändert. Datenbanken ohne Version (vor Einführung) gelten als
+Version 1. Ist die Datenbank neuer als der Code, startet der Dienst nicht
+(„Datenbank stammt von neuerer aRSSe-Version“). Eine Änderung, die sich nicht per SQL
+nachziehen lässt, wird als `REBUILD` eingetragen: Die alte Datei wandert nach
+`arsse.db.v<N>.bak` und die Datenbank entsteht neu – sie ist ein Zwischenspeicher, der
+nächste Lauf holt alles wieder aus Miniflux, nur Story-IDs und „zuerst gesehen“ gehen verloren.
+
+**Lesen:** Die Weboberfläche liest Story und Artikel in einer Lesetransaktion. Ein Lauf,
+der dazwischen speichert, kann daher keine halbe Story (und keinen Fehler 500) erzeugen.
 
 **Stabile Story-IDs:** Das Clustering nummeriert Cluster bei jedem Lauf neu. Ein neuer Cluster
 übernimmt daher die ID der bisherigen Story, mit der er die meisten Artikel teilt;

@@ -86,12 +86,12 @@ Miniflux ist ein minimalistischer RSS-Reader, geschrieben in Go. Er dient als ze
 
 Der Python-Service läuft zyklisch (Standard: alle 30 Minuten) und führt folgende Schritte aus:
 
-1. **Extraction**: Abruf aller Artikel der letzten 24 Stunden via Miniflux API (gelesen und ungelesen, paginiert)
+1. **Extraction**: Abruf aller Artikel der letzten 24 Stunden via Miniflux API (gelesen und ungelesen, seitenweise nach Artikel-ID – auch bei gleichen Veröffentlichungszeiten kommt kein Artikel doppelt)
 2. **Preprocessing**: HTML entfernen, Normalisierung, Stopwords, Stemming (Snowball)
 3. **Vectorization**: TF-IDF über Uni- und Bigramme
 4. **Clustering**: Agglomeratives Clustering (Average Linkage) gruppiert Artikel zum selben Ereignis zu einer *Story*
 5. **Deduplication**: Near-Duplicates (z.B. identische Agenturmeldungen) innerhalb einer Story
-6. **Persistence**: Stories landen in einer lokalen SQLite-Datenbank (`data/intelligence/arsse.db`) mit über Läufe hinweg stabilen IDs; Duplikate werden optional in Miniflux als gelesen markiert
+6. **Persistence**: Stories landen in einer lokalen SQLite-Datenbank (`data/intelligence/arsse.db`) mit über Läufe hinweg stabilen IDs; Duplikate werden optional in Miniflux als gelesen markiert. Nach einem Update passt der Service das Schema der Datenbank beim Start selbst an
 
 Die Miniflux-API kann keine Tags oder eigenen Metadaten schreiben – deshalb bringt der Service eine eigene, JavaScript-freie Oberfläche mit:
 
@@ -232,6 +232,8 @@ server {
 4. Zu wenige oder zu große Stories: `threshold` mit `evaluate.py` kalibrieren (höher = größere, aber unschärfere Stories)
 5. `Cannot open story database`: Der Container konnte `${DATA_PATH}/intelligence` nicht an `PUID:PGID` übergeben (z.B. NFS-Freigabe mit `root_squash`, oder eine ältere `docker-compose.yml` mit `user:`) – dann `chown PUID:PGID` auf das Verzeichnis selbst ausführen
 6. Alle Links der Top Stories zeigen auf `localhost` oder die falsche Adresse: `BASE_URL` in `.env` setzen und `docker compose up -d` ausführen
+7. `Datenbank stammt von neuerer aRSSe-Version`: Das Image ist älter als die Datenbank (z.B. nach einem Rückschritt auf eine ältere Version). Entweder wieder die neuere Version starten, ein Backup von `arsse.db` aus der Zeit vor dem Update einspielen oder `${DATA_PATH}/intelligence/arsse.db*` löschen – die Datenbank ist nur ein Zwischenspeicher und wird beim nächsten Lauf aus Miniflux neu aufgebaut (nur die Story-IDs ändern sich)
+8. Der Container startet nicht und das Log nennt eine Einstellung (z.B. `scheduling.batch_size must be between 1 and 1000`): den Wert in `config.yaml` bzw. `.env` korrigieren
 
 ### E-Ink-Darstellung fehlerhaft
 

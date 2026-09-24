@@ -1,6 +1,6 @@
 import pytest
 
-from config import load_config
+from config import ConfigError, load_config
 
 
 def write_yaml(tmp_path, text):
@@ -95,3 +95,58 @@ def test_miniflux_port_with_host_ip_binding(tmp_path, monkeypatch, caplog):
     monkeypatch.delenv('MINIFLUX_PORT')
     path = write_yaml(tmp_path, 'miniflux:\n  public_port: "127.0.0.1:8092"\n')
     assert load_config(path).miniflux_public_port == 8092
+
+
+@pytest.mark.parametrize('yaml_text, key', [
+    ('scheduling:\n  batch_size: 1500\n', 'scheduling.batch_size'),
+    ('scheduling:\n  batch_size: 0\n', 'scheduling.batch_size'),
+    ('scheduling:\n  max_entries: 6000\n', 'scheduling.max_entries'),
+    ('scheduling:\n  lookback_hours: 0\n', 'scheduling.lookback_hours'),
+    ('scheduling:\n  batch_size: yes\n', 'scheduling.batch_size'),
+    ('storage:\n  retention_days: 0\n', 'storage.retention_days'),
+    ('storage:\n  retention_days: -1\n', 'storage.retention_days'),
+    ('storage:\n  retention_days: 1\nscheduling:\n  lookback_hours: 48\n',
+     'storage.retention_days'),
+    ('clustering:\n  max_features: 0\n', 'clustering.max_features'),
+    ('clustering:\n  threshold: "0.8"\n', 'clustering.threshold'),
+    ('deduplication:\n  threshold: "hoch"\n', 'deduplication.threshold'),
+    ('web:\n  articles_per_story: -1\n', 'web.articles_per_story'),
+    ('web:\n  max_stories: 0\n', 'web.max_stories'),
+    ('web:\n  min_sources: 1.5\n', 'web.min_sources'),
+    ('miniflux:\n  url: null\n', 'miniflux.url'),
+    ('miniflux:\n  url: ""\n', 'miniflux.url'),
+    ('miniflux:\n  public_url: null\n', 'miniflux.public_url'),
+    ('storage:\n  db_path: ""\n', 'storage.db_path'),
+])
+def test_values_that_would_break_silently_are_rejected(tmp_path, monkeypatch, yaml_text, key):
+    for var in ('CLUSTERING_THRESHOLD', 'DEDUP_THRESHOLD', 'MINIFLUX_URL',
+                'MINIFLUX_PUBLIC_URL'):
+        monkeypatch.delenv(var, raising=False)
+    with pytest.raises(ConfigError) as error:
+        load_config(write_yaml(tmp_path, yaml_text))
+    assert key in str(error.value)
+
+
+def test_limits_themselves_are_accepted(tmp_path, monkeypatch):
+    monkeypatch.delenv('CLUSTERING_THRESHOLD', raising=False)
+    cfg = load_config(write_yaml(tmp_path, (
+        'scheduling:\n  batch_size: 1000\n  max_entries: 5000\n  lookback_hours: 24\n'
+        'storage:\n  retention_days: 1\n'
+        'clustering:\n  threshold: 0.1\n  max_features: 1\n'
+        'web:\n  articles_per_story: 0\n  max_stories: 1\n')))
+    assert cfg.scheduling.batch_size == 1000
+    assert cfg.clustering.threshold == 0.1
+
+
+def test_malformed_numbers_in_env_name_the_variable(monkeypatch):
+    monkeypatch.setenv('CLUSTERING_THRESHOLD', 'null,8')
+    with pytest.raises(ConfigError, match='CLUSTERING_THRESHOLD'):
+        load_config(None)
+    monkeypatch.delenv('CLUSTERING_THRESHOLD')
+    monkeypatch.setenv('CLUSTERING_INTERVAL', '30m')
+    with pytest.raises(ConfigError, match='CLUSTERING_INTERVAL'):
+        load_config(None)
+
+
+def test_config_error_is_a_value_error():
+    assert issubclass(ConfigError, ValueError)

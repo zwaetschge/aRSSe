@@ -26,6 +26,15 @@ _LEGACY_DUPLICATE_ACTIONS = {'tag': 'none', 'hide': 'mark_read'}
 # DBSCAN settings from before the switch to average-linkage clustering
 _LEGACY_CLUSTERING_KEYS = ('eps', 'min_samples', 'metric')
 
+# Miniflux rejects larger pages (model.MaxEntryLimit)
+MAX_BATCH_SIZE = 1000
+# Average linkage needs time and memory quadratic in the number of articles
+MAX_ENTRIES_LIMIT = 5000
+
+
+class ConfigError(ValueError):
+    """A setting is invalid; the message names the setting."""
+
 
 @dataclass
 class ClusteringConfig:
@@ -112,7 +121,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
         Config object with all settings.
 
     Raises:
-        ValueError: If a setting is invalid.
+        ConfigError: If a setting is invalid.
     """
     config = Config()
 
@@ -208,32 +217,75 @@ def _apply_env_config(config: Config) -> None:
 
     # Clustering
     if threshold := _env('CLUSTERING_THRESHOLD'):
-        config.clustering.threshold = float(threshold)
+        config.clustering.threshold = _env_number('CLUSTERING_THRESHOLD', threshold, float)
     for obsolete in ('CLUSTERING_EPS', 'CLUSTERING_MIN_SAMPLES'):
         if _env(obsolete):
             logger.warning("%s is obsolete and ignored; use CLUSTERING_THRESHOLD", obsolete)
 
     # Deduplication
     if threshold := _env('DEDUP_THRESHOLD'):
-        config.deduplication.threshold = float(threshold)
+        config.deduplication.threshold = _env_number('DEDUP_THRESHOLD', threshold, float)
     if action := _env('DEDUP_ACTION'):
         config.deduplication.duplicate_action = action
 
     # Scheduling
     if interval := _env('CLUSTERING_INTERVAL'):
-        config.scheduling.interval_minutes = int(interval)
+        config.scheduling.interval_minutes = _env_number('CLUSTERING_INTERVAL', interval, int)
 
     # Web
     if port := _env('WEB_PORT'):
-        config.web.port = int(port)
+        config.web.port = _env_number('WEB_PORT', port, int)
 
     # Logging
     if level := _env('LOG_LEVEL'):
         config.logging.level = level
 
 
+def _env_number(name: str, value: str, cast):
+    """Convert an environment variable, naming it if that fails."""
+    try:
+        return cast(value)
+    except ValueError:
+        raise ConfigError(f"{name} must be a number, got '{value}'") from None
+
+
+# Numeric settings: (config path, attribute path, int only)
+_NUMERIC_FIELDS = (
+    ('clustering.threshold', ('clustering', 'threshold'), False),
+    ('clustering.max_features', ('clustering', 'max_features'), True),
+    ('deduplication.threshold', ('deduplication', 'threshold'), False),
+    ('scheduling.interval_minutes', ('scheduling', 'interval_minutes'), True),
+    ('scheduling.batch_size', ('scheduling', 'batch_size'), True),
+    ('scheduling.max_entries', ('scheduling', 'max_entries'), True),
+    ('scheduling.lookback_hours', ('scheduling', 'lookback_hours'), True),
+    ('storage.retention_days', ('storage', 'retention_days'), True),
+    ('web.max_stories', ('web', 'max_stories'), True),
+    ('web.articles_per_story', ('web', 'articles_per_story'), True),
+    ('web.min_sources', ('web', 'min_sources'), True),
+)
+
+
+def _check_types(config: Config) -> None:
+    """Reject numbers given as strings (e.g. threshold: '0.8') with a clear message."""
+    for name, (section, attr), int_only in _NUMERIC_FIELDS:
+        value = getattr(getattr(config, section), attr)
+        if name == 'clustering.max_features' and value is None:
+            continue  # no vocabulary limit
+        allowed = (int,) if int_only else (int, float)
+        # bool is an int subclass, but 'batch_size: yes' is a mistake
+        if isinstance(value, bool) or not isinstance(value, allowed):
+            kind = 'an integer' if int_only else 'a number'
+            raise ConfigError(f"{name} must be {kind}, got {value!r}")
+    for name, value in (('miniflux.url', config.miniflux_url),
+                        ('miniflux.public_url', config.miniflux_public_url),
+                        ('storage.db_path', config.storage.db_path)):
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"{name} must be a non-empty string, got {value!r}")
+
+
 def _validate(config: Config) -> None:
     """Normalize legacy values and reject settings that cannot work."""
+    _check_types(config)
     dedup = config.deduplication
     if dedup.duplicate_action in _LEGACY_DUPLICATE_ACTIONS:
         replacement = _LEGACY_DUPLICATE_ACTIONS[dedup.duplicate_action]
@@ -242,22 +294,45 @@ def _validate(config: Config) -> None:
         dedup.duplicate_action = replacement
 
     if dedup.duplicate_action not in DUPLICATE_ACTIONS:
-        raise ValueError(f"duplicate_action must be one of {DUPLICATE_ACTIONS}, "
-                         f"got '{dedup.duplicate_action}'")
+        raise ConfigError(f"deduplication.duplicate_action must be one of "
+                          f"{DUPLICATE_ACTIONS}, got '{dedup.duplicate_action}'")
     if dedup.canonical_strategy not in CANONICAL_STRATEGIES:
-        raise ValueError(f"canonical_strategy must be one of {CANONICAL_STRATEGIES}, "
-                         f"got '{dedup.canonical_strategy}'")
+        raise ConfigError(f"deduplication.canonical_strategy must be one of "
+                          f"{CANONICAL_STRATEGIES}, got '{dedup.canonical_strategy}'")
     if not 0.0 < dedup.threshold <= 1.0:
-        raise ValueError("deduplication.threshold must be in (0, 1]")
+        raise ConfigError("deduplication.threshold must be in (0, 1]")
     if not 0.0 < config.clustering.threshold < 1.0:
-        raise ValueError("clustering.threshold must be in (0, 1)")
+        raise ConfigError("clustering.threshold must be in (0, 1)")
+    if config.clustering.max_features is not None and config.clustering.max_features < 1:
+        raise ConfigError("clustering.max_features must be at least 1")
     if not 0 < config.miniflux_public_port < 65536:
-        raise ValueError("miniflux.public_port must be a TCP port (1-65535)")
+        raise ConfigError("miniflux.public_port must be a TCP port (1-65535)")
     if config.web.min_sources < 1:
-        raise ValueError("web.min_sources must be at least 1")
-    if config.scheduling.interval_minutes < 1:
-        raise ValueError("scheduling.interval_minutes must be at least 1")
-    if config.scheduling.batch_size < 1 or config.scheduling.max_entries < 1:
-        raise ValueError("scheduling.batch_size and max_entries must be positive")
-    if getattr(logging, config.logging.level.upper(), None) is None:
-        raise ValueError(f"Unknown log level '{config.logging.level}'")
+        raise ConfigError("web.min_sources must be at least 1")
+    if config.web.max_stories < 1:
+        raise ConfigError("web.max_stories must be at least 1")
+    if config.web.articles_per_story < 0:
+        raise ConfigError("web.articles_per_story must not be negative")
+
+    scheduling = config.scheduling
+    if scheduling.interval_minutes < 1:
+        raise ConfigError("scheduling.interval_minutes must be at least 1")
+    if not 1 <= scheduling.batch_size <= MAX_BATCH_SIZE:
+        raise ConfigError(f"scheduling.batch_size must be between 1 and {MAX_BATCH_SIZE} "
+                          f"(Miniflux limit), got {scheduling.batch_size}")
+    if not 1 <= scheduling.max_entries <= MAX_ENTRIES_LIMIT:
+        raise ConfigError(f"scheduling.max_entries must be between 1 and "
+                          f"{MAX_ENTRIES_LIMIT}, got {scheduling.max_entries}")
+    if scheduling.lookback_hours < 1:
+        raise ConfigError("scheduling.lookback_hours must be at least 1")
+    retention_days = config.storage.retention_days
+    if retention_days < 1:
+        raise ConfigError("storage.retention_days must be at least 1")
+    if retention_days * 24 < scheduling.lookback_hours:
+        # Cleanup would delete stories that are still inside the window
+        raise ConfigError(f"storage.retention_days ({retention_days}) must cover "
+                          f"scheduling.lookback_hours ({scheduling.lookback_hours} h)")
+
+    if (not isinstance(config.logging.level, str)
+            or getattr(logging, config.logging.level.upper(), None) is None):
+        raise ConfigError(f"Unknown log level '{config.logging.level}' (logging.level)")

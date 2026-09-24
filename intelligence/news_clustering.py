@@ -33,13 +33,18 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_distances, cosine_similarity
 
 from config import Config, load_config
-from store import ClusterResult, StoryStore
+from store import (MAX_TITLE_CHARS, ClusterResult, FetchResult, StoreTooNewError,
+                   StoryStore)
 
 logger = logging.getLogger('arsse-intelligence')
 
 SNIPPET_LENGTH = 280
 # Long articles add little signal but cost a lot of vectorization time
 MAX_CONTENT_CHARS = 5000
+# HTML beyond this is not even parsed: a broken or hostile feed item of
+# several MB would cost seconds and hundreds of MB per run. Real items stay
+# far below (at most 6 KB in the calibration corpus).
+MAX_HTML_CHARS = 200_000
 # First retry delay after a failed cycle; doubles up to the normal interval
 MIN_RETRY_SECONDS = 10
 
@@ -144,7 +149,8 @@ class NewsClusterer:
         }
 
         try:
-            entries = self._fetch_recent_entries()
+            fetch = self._fetch_recent_entries()
+            entries = fetch.entries
             stats['articles_processed'] = len(entries)
             logger.info("Processing %d articles", len(entries))
 
@@ -152,7 +158,7 @@ class NewsClusterer:
             stats['clusters_found'] = len(clusters)
             stats['duplicates_detected'] = sum(len(c.duplicate_ids) for c in clusters)
 
-            self.store.save_run(entries, clusters)
+            self.store.save_run(entries, clusters, fetch)
             self.store.cleanup(self.config.storage.retention_days)
 
             if self.config.deduplication.duplicate_action == 'mark_read':
@@ -221,35 +227,62 @@ class NewsClusterer:
         logger.info("Found %d clusters", len(clusters))
         return clusters
 
-    def _fetch_recent_entries(self) -> list:
-        """Fetch all entries published within the lookback window."""
-        cutoff = datetime.now(timezone.utc) - timedelta(
-            hours=self.config.scheduling.lookback_hours
-        )
+    def _fetch_recent_entries(self) -> FetchResult:
+        """
+        Fetch all entries published within the lookback window.
+
+        Pages by entry ID (keyset): each page asks for IDs below the
+        smallest one seen so far. Offset paging over published_at returned
+        the same entry on two pages whenever publication dates tie (whole
+        minutes, feeds without dates) or Miniflux stored new entries while
+        paging. New entries always get higher IDs and never shift a page.
+        """
+        fetched_at = datetime.now(timezone.utc)
+        cutoff = fetched_at - timedelta(hours=self.config.scheduling.lookback_hours)
         batch_size = self.config.scheduling.batch_size
         max_entries = self.config.scheduling.max_entries
 
-        # Read entries are included so stories stay intact after reading
-        entries = []
-        offset = 0
-        while len(entries) < max_entries:
+        # Keyed by ID: an entry must never reach save_run twice
+        entries = {}
+        before_id = None
+        truncated = False
+        while True:
+            if len(entries) >= max_entries:
+                truncated = True
+                break
+            limit = min(batch_size, max_entries - len(entries))
+            params = {}
+            if before_id is not None:
+                params['before_entry_id'] = before_id
+            # Read entries are included so stories stay intact after reading
             page = self.client.get_entries(
                 status=['unread', 'read'],
                 published_after=int(cutoff.timestamp()),
-                order='published_at',
+                order='id',
                 direction='desc',
-                limit=min(batch_size, max_entries - len(entries)),
-                offset=offset,
+                limit=limit,
+                **params,
             )
             batch = page.get('entries') or []
-            entries.extend(batch)
-            offset += len(batch)
-            if len(batch) == 0 or offset >= page.get('total', 0):
+            known = len(entries)
+            for entry in batch:
+                entries.setdefault(entry['id'], entry)
+            if len(entries) == known:  # empty page, or a server ignoring before_entry_id
+                break
+            before_id = min(entry['id'] for entry in batch)
+            # total counts what is left below before_entry_id, this page included
+            if len(batch) < limit or len(batch) >= page.get('total', len(batch) + 1):
                 break
 
-        if len(entries) >= max_entries:
+        if truncated:
             logger.warning("Reached max_entries=%d, older articles are skipped", max_entries)
-        return entries
+        return FetchResult(
+            entries=list(entries.values()),
+            cutoff=cutoff,
+            complete=not truncated,
+            min_id=min(entries) if entries else None,
+            fetched_at=fetched_at,
+        )
 
     def _preprocess_entry(self, entry: dict) -> str:
         """
@@ -258,8 +291,8 @@ class NewsClusterer:
         Combines title and content, removes HTML, normalizes text.
         Stores a plain-text snippet on the entry for the web interface.
         """
-        title = entry.get('title') or ''
-        content = entry.get('content') or ''
+        title = (entry.get('title') or '')[:MAX_TITLE_CHARS]
+        content = (entry.get('content') or '')[:MAX_HTML_CHARS]
 
         if content:
             content = BeautifulSoup(content, 'lxml').get_text(separator=' ')
@@ -435,6 +468,9 @@ def main():
 
     try:
         store = StoryStore(config.storage.db_path)
+    except StoreTooNewError as e:
+        logger.error("%s", e)
+        sys.exit(1)
     except Exception as e:
         logger.error("Cannot open story database %s: %s (is the data directory "
                      "writable for UID %d?)", config.storage.db_path, e, os.getuid())
