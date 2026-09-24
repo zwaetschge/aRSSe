@@ -48,13 +48,16 @@ check_requirements() {
     fi
     print_step "Docker gefunden: $(docker --version)"
 
-    # Docker Compose prüfen
-    if command -v docker-compose &> /dev/null; then
-        print_step "Docker Compose gefunden: $(docker-compose --version)"
-        COMPOSE_CMD="docker-compose"
-    elif docker compose version &> /dev/null 2>&1; then
+    # Docker Compose prüfen (v2-Plugin bevorzugt, kann auf Health Checks warten)
+    if docker compose version &> /dev/null; then
         print_step "Docker Compose (Plugin) gefunden: $(docker compose version)"
         COMPOSE_CMD="docker compose"
+        WAIT_FLAG="--wait"
+    elif command -v docker-compose &> /dev/null; then
+        print_step "Docker Compose gefunden: $(docker-compose --version)"
+        print_warning "docker-compose v1 ist veraltet, bitte auf 'docker compose' umsteigen"
+        COMPOSE_CMD="docker-compose"
+        WAIT_FLAG=""
     else
         print_error "Docker Compose ist nicht installiert!"
         exit 1
@@ -99,6 +102,7 @@ setup_environment() {
         # Datenpfad für Unraid anpassen
         if [ -d "/mnt/user/appdata" ]; then
             sed -i "s|DATA_PATH=./data|DATA_PATH=/mnt/user/appdata/arsse|" "$ENV_FILE"
+            sed -i "s|^PUID=.*|PUID=99|; s|^PGID=.*|PGID=100|" "$ENV_FILE"
             mkdir -p /mnt/user/appdata/arsse/postgresql
             mkdir -p /mnt/user/appdata/arsse/intelligence
             print_step "Unraid-Umgebung erkannt, Pfade angepasst"
@@ -112,7 +116,27 @@ setup_environment() {
         echo ""
     fi
 
+    fix_permissions
     echo ""
+}
+
+fix_permissions() {
+    # Der Intelligence-Container läuft als PUID:PGID und braucht Schreibrechte
+    local env_file="$PROJECT_DIR/.env"
+    local data_path puid pgid
+    data_path=$(grep -E '^DATA_PATH=' "$env_file" | cut -d= -f2)
+    puid=$(grep -E '^PUID=' "$env_file" | cut -d= -f2)
+    pgid=$(grep -E '^PGID=' "$env_file" | cut -d= -f2)
+    data_path="${data_path:-./data}"
+    [[ "$data_path" = /* ]] || data_path="$PROJECT_DIR/${data_path#./}"
+
+    mkdir -p "$data_path/intelligence"
+    if chown "${puid:-1000}:${pgid:-1000}" "$data_path/intelligence" 2>/dev/null; then
+        print_step "Rechte für $data_path/intelligence gesetzt (${puid:-1000}:${pgid:-1000})"
+    else
+        print_warning "Konnte Besitzer von $data_path/intelligence nicht setzen."
+        print_warning "Bitte ausführen: sudo chown ${puid:-1000}:${pgid:-1000} $data_path/intelligence"
+    fi
 }
 
 start_services() {
@@ -120,14 +144,10 @@ start_services() {
 
     cd "$PROJECT_DIR"
 
-    # Nur Miniflux und PostgreSQL starten (Intelligence Layer ist optional)
-    $COMPOSE_CMD up -d db miniflux
-
-    print_step "Warte auf Datenbank-Initialisierung..."
-    sleep 10
-
-    # Prüfe ob Miniflux läuft
-    if $COMPOSE_CMD ps | grep -q "miniflux.*Up"; then
+    # Nur Miniflux und PostgreSQL starten (Intelligence Layer braucht erst den API-Key)
+    print_step "Starte Datenbank und Miniflux, warte auf Health Checks..."
+    # shellcheck disable=SC2086
+    if $COMPOSE_CMD up -d $WAIT_FLAG db miniflux; then
         print_step "Miniflux gestartet"
     else
         print_error "Miniflux konnte nicht gestartet werden!"
@@ -144,7 +164,10 @@ print_next_steps() {
 
     # IP-Adresse ermitteln
     IP=$(hostname -I | awk '{print $1}')
-    PORT=$(grep MINIFLUX_PORT "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "8080")
+    PORT=$(grep -E '^MINIFLUX_PORT=' "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2)
+    PORT="${PORT:-8080}"
+    INTELLIGENCE_PORT=$(grep -E '^INTELLIGENCE_PORT=' "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2)
+    INTELLIGENCE_PORT="${INTELLIGENCE_PORT:-8081}"
 
     echo "1. Öffnen Sie Miniflux im Browser:"
     echo -e "   ${GREEN}http://$IP:$PORT${NC}"
@@ -159,10 +182,13 @@ print_next_steps() {
     echo "5. (Optional) Fügen Sie das E-Ink-Theme hinzu unter:"
     echo "   Einstellungen > Benutzerdefiniertes CSS"
     echo "   (CSS-Datei: $PROJECT_DIR/css/eink-theme.css)"
+    echo "   Für die Web-Fonts unter 'Externe Schriftart-Hosts' eintragen:"
+    echo "   fonts.googleapis.com fonts.gstatic.com"
     echo ""
-    echo "6. (Optional) Starten Sie den Intelligence Layer:"
+    echo "6. (Optional) Starten Sie den Intelligence Layer (Top Stories):"
     echo "   a. Tragen Sie den API-Key in .env ein (MINIFLUX_API_KEY=...)"
     echo "   b. $COMPOSE_CMD up -d intelligence"
+    echo -e "   c. Top Stories: ${GREEN}http://$IP:$INTELLIGENCE_PORT${NC}"
     echo ""
     echo -e "${BLUE}Nützliche Befehle:${NC}"
     echo "  Status:    $COMPOSE_CMD ps"

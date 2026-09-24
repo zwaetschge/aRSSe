@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>aRSSe-Miniflux</Name>
-  <Repository>miniflux/miniflux:latest</Repository>
+  <Repository>miniflux/miniflux:2.3.3</Repository>
   <Registry>https://hub.docker.com/r/miniflux/miniflux</Registry>
   <Network>bridge</Network>
   <MyIP/>

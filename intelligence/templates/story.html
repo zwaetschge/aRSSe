@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}{{ story.headline.title }}{% endblock %}
+{% block content %}
+<article class="story">
+  <h2><a href="{{ entry_link(story.headline) }}">{{ story.headline.title }}</a></h2>
+  <div class="meta">
+    {{ story.source_count }} Quellen, {{ story.article_count }} Artikel
+    · zuerst gesehen {{ story.first_seen | ago }}
+  </div>
+  {% if story.headline.snippet %}<p class="snippet">{{ story.headline.snippet }}</p>{% endif %}
+
+  <ul class="coverage">
+    {% for a in story.articles %}
+    <li class="{{ 'duplicate' if a.is_duplicate }}">
+      <span class="source">{{ a.feed_title }}</span>:
+      <a href="{{ entry_link(a) }}">{{ a.title }}</a>
+      <span class="meta">{{ a.published_at | ago }}</span>
+      {% if a.is_duplicate %}<span class="label">Duplikat</span>{% endif %}
+      {% if safe_url(a.url) %}· <a class="meta" href="{{ safe_url(a.url) }}" rel="noopener noreferrer">Original</a>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</article>
+<a class="more" href="/">← Zurück zu Top Stories</a>
+{% endblock %}

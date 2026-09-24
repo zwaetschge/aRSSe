@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{% block title %}Top Stories{% endblock %} · aRSSe</title>
+<style>
+  /* E-Ink first: no animations, no web fonts, pure contrast */
+  :root {
+    --ink: #000;
+    --paper: #fff;
+    --muted: #444;
+    --rule: #000;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #eee; --paper: #111; --muted: #aaa; --rule: #666; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto;
+    max-width: 44rem;
+    padding: 0 1rem 3rem;
+    background: var(--paper);
+    color: var(--ink);
+    font: 1.05rem/1.5 Georgia, "Times New Roman", serif;
+  }
+  a { color: inherit; }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: .5rem;
+    border-bottom: 3px double var(--rule);
+    padding: 1rem 0 .5rem;
+    margin-bottom: 1rem;
+  }
+  header h1 { margin: 0; font-size: 1.6rem; letter-spacing: .02em; }
+  header nav a { margin-left: 1rem; }
+  .meta, .status { color: var(--muted); font-size: .85rem; }
+  article.story {
+    border-bottom: 1px solid var(--rule);
+    padding: .75rem 0 1rem;
+  }
+  .story h2 { margin: 0 0 .25rem; font-size: 1.25rem; line-height: 1.3; }
+  .story h2 a { text-decoration: none; }
+  .story h2 a:hover, .story h2 a:focus { text-decoration: underline; }
+  .snippet { margin: .25rem 0 .5rem; }
+  ul.coverage { list-style: none; margin: .5rem 0 0; padding: 0; }
+  ul.coverage li { padding: .35rem 0; border-top: 1px dotted var(--rule); }
+  ul.coverage a { text-decoration: none; }
+  .source { font-weight: bold; }
+  .duplicate { color: var(--muted); }
+  .duplicate .label { font-size: .75rem; border: 1px solid var(--muted); padding: 0 .25rem; }
+  .more { display: inline-block; margin-top: .5rem; min-height: 44px; line-height: 44px; }
+  .empty { padding: 2rem 0; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="/" style="text-decoration:none">aRSSe</a></h1>
+  <nav><a href="/">Top Stories</a><a href="{{ miniflux_url }}">Miniflux</a></nav>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>
