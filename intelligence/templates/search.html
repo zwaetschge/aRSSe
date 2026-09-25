@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% macro pager(position) %}
+{% if prev_url or next_url %}
+<nav class="pager {{ position }}" aria-label="Seiten">
+  {% if prev_url %}<a href="{{ prev_url }}" rel="prev"><span aria-hidden="true">←</span> Zurück</a>{% else %}<span></span>{% endif %}
+  {% if next_url %}<a href="{{ next_url }}" rel="next">Weiter <span aria-hidden="true">→</span></a>{% endif %}
+</nav>
+{% endif %}
+{% endmacro %}
+{# Older articles may have been deleted in Miniflux (see story.html), so
+   only articles inside the window link there, the others to the publisher #}
+{% macro link(a) %}{{ entry_link(a) if a.in_window else safe_url(a.url) }}{% endmacro %}
+{% block title %}{% if query %}Suche: {{ query }}{% else %}Suche{% endif %}{% endblock %}
+{% block content %}
+{% if not query %}
+<p class="status">{% if too_long %}Höchstens 100 Zeichen. {% endif %}Suchbegriff mit mindestens 2 Zeichen eingeben; gesucht wird in Titeln und Anrissen aller gespeicherten Stories.</p>
+{% else %}
+<p class="status">
+  {{- total }} {{ 'Story' if total == 1 else 'Stories' }} zu „{{ query }}“
+  {%- if pages > 1 %} · Seite {{ page }} von {{ pages }}{% endif %}
+</p>
+{{ pager('top') }}
+{% for story in stories %}
+{% set head = story.headline %}
+<article class="story">
+  <h2>{% if link(head) %}<a href="{{ link(head) }}">{{ display_title(head) }}</a>{% else %}{{ display_title(head) }}{% endif %}</h2>
+  <div class="meta">
+    {{ story.articles[0].published_at | clock }} · {{ story.source_count }} Quellen, {{ story.article_count }} Artikel
+  </div>
+  <ul class="coverage">
+    {% for a in story.matches[:per_story] %}
+    <li>{% if link(a) %}<a href="{{ link(a) }}"><b>{{ a.feed_title }}:</b> {{ display_title(a, false) }} {{ a.published_at | clock }}</a>
+      {%- else %}<div class="plain"><b>{{ a.feed_title }}:</b> {{ display_title(a, false) }} {{ a.published_at | clock }}</div>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% if story.current %}
+  <a class="more" href="{{ nav('/story/' ~ story.id) }}">Zur Story <span aria-hidden="true">→</span></a>
+  {% endif %}
+</article>
+{% else %}
+<p class="empty">Keine Story gefunden.</p>
+{% endfor %}
+{{ pager('bottom') }}
+<a class="more" href="{{ miniflux_search }}">In Miniflux suchen <span aria-hidden="true">→</span></a>
+{% endif %}
+{% endblock %}

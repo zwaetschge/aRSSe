@@ -13,6 +13,9 @@ Architecture:
     5. Deduplication: Near-duplicate detection within clusters
     6. Persistence: Stories go to a local SQLite database (Miniflux cannot
        store tags via its API); duplicates are optionally marked as read
+
+Between clustering runs, a light status sync takes over articles read in
+Miniflux (StatusSync), so read stories leave the front page within minutes.
 """
 
 import logging
@@ -22,9 +25,10 @@ import signal
 import sys
 import threading
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
-from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlsplit, urlunsplit
 
 import miniflux
 from bs4 import BeautifulSoup
@@ -32,9 +36,9 @@ from sklearn.cluster import AgglomerativeClustering
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_distances, cosine_similarity
 
-from config import Config, load_config
+from config import MAX_SECTION_CHARS, Config, load_config
 from store import (MAX_TITLE_CHARS, ClusterResult, FetchResult, StoreTooNewError,
-                   StoryStore)
+                   StoryStore, parse_date)
 
 logger = logging.getLogger('arsse-intelligence')
 
@@ -65,6 +69,17 @@ MAX_HTML_CHARS = 200_000
 _DATA_URI_RE = re.compile(r'(?<![^\s"\'<>()])data:[^\s"\'<>()]{250,}', re.IGNORECASE)
 # First retry delay after a failed cycle; doubles up to the normal interval
 MIN_RETRY_SECONDS = 10
+# Timeout of Miniflux requests: a clustering run pages through many entries,
+# the web interface ('Story gelesen') must not keep a page waiting long
+CLIENT_TIMEOUT = 60
+WEB_CLIENT_TIMEOUT = 15
+# Consecutive status syncs overlap by this much: Miniflux compares changed_at
+# in whole seconds, and the clocks of the two containers may differ a little
+STATUS_SYNC_OVERLAP = timedelta(seconds=60)
+# After failures the status sync waits up to this many intervals
+STATUS_SYNC_MAX_BACKOFF = 8
+# Titles of Miniflux's default category (see section_of)
+DEFAULT_CATEGORIES = ('all', 'alle')
 
 _TOKEN_RE = re.compile(r'\b\w\w+\b')
 # Query parameters that only track the click, not select the article
@@ -98,6 +113,8 @@ class NewsClusterer:
         self.stemmer = self._get_stemmer()
         self.noise_patterns = [re.compile(p, re.IGNORECASE)
                                for p in config.clustering.noise_title_patterns]
+        self.path_sections = [(re.compile(p, re.IGNORECASE), name)
+                              for p, name in config.web.path_sections.items()]
         # Whose API key is it? Asked once Miniflux answers (see check_api_key_user)
         self.api_key_checked = False
 
@@ -106,14 +123,7 @@ class NewsClusterer:
 
     def _create_client(self) -> miniflux.Client:
         """Create the Miniflux API client."""
-        if not self.config.miniflux_api_key:
-            raise ValueError("MINIFLUX_API_KEY not set. Please configure the API key.")
-
-        return miniflux.Client(
-            self.config.miniflux_url,
-            api_key=self.config.miniflux_api_key,
-            timeout=60,
-        )
+        return create_client(self.config)
 
     def _get_stopwords(self) -> list:
         """Get stopwords for the configured language."""
@@ -181,6 +191,8 @@ class NewsClusterer:
             entries = fetch.entries
             stats['articles_processed'] = len(entries)
             logger.info("Processing %d articles", len(entries))
+            for entry in entries:
+                entry['_section'] = section_of(entry, self.path_sections)
 
             # Read before clustering: an entry aRSSe marked read never stays
             # in place of an unread copy (see _detect_duplicates)
@@ -191,6 +203,8 @@ class NewsClusterer:
 
             self.store.save_run(entries, clusters, fetch, self.config.web.min_sources,
                                 sticky_headline=self._sticky_headline())
+            # Statuses as of this fetch are stored now (see StatusSync)
+            self.store.set_meta('last_fetch_at', fetch.fetched_at.isoformat())
             self.store.refresh_auto_marked([e['id'] for e in entries])
             self.store.cleanup(self.config.storage.retention_days,
                                self.config.scheduling.lookback_hours)
@@ -224,6 +238,8 @@ class NewsClusterer:
         A story of two articles needs a cosine similarity of at least
         clustering.min_pair_similarity: for two articles, average linkage
         only asks for 1 - threshold, which one shared rare word reaches.
+
+        Stories of one topic get the same topic_key (see _topic_keys).
         """
         texts = [self._preprocess_entry(e) for e in entries]
         valid_indices = [i for i, t in enumerate(texts)
@@ -259,6 +275,8 @@ class NewsClusterer:
                        if len(v) > 2 or 1 - distances[v[0], v[1]] >= min_similarity}
 
         clusters = []
+        topics = []
+        topic_labels = self._topic_labels(distances)
         for member_indices in cluster_map.values():
             cluster_entries = [valid_entries[i] for i in member_indices]
             duplicates, copies = self._detect_duplicates(cluster_entries, auto_marked)
@@ -276,9 +294,33 @@ class NewsClusterer:
                 copy_ids=copies,
                 noise_ids={e['id'] for e in cluster_entries if not self._headline_worthy(e)},
             ))
+            if topic_labels is not None:
+                topics.append(Counter(topic_labels[i] for i in member_indices)
+                              .most_common(1)[0][0])
+        if topic_labels is not None:
+            _set_topic_keys(clusters, topics)
 
         logger.info("Found %d clusters", len(clusters))
         return clusters
+
+    def _topic_labels(self, distances):
+        """
+        Topic group of every article, or None if topics are off.
+
+        A second average-linkage pass over the same distances with the
+        looser clustering.topic_threshold: stories about one event from
+        different angles (the match, the coach, the reactions) end up in
+        one topic, while story boundaries stay at clustering.threshold.
+        """
+        threshold = self.config.clustering.topic_threshold
+        if not threshold:
+            return None
+        return AgglomerativeClustering(
+            n_clusters=None,
+            metric='precomputed',
+            linkage='average',
+            distance_threshold=threshold,
+        ).fit(distances).labels_
 
     def _fetch_recent_entries(self) -> FetchResult:
         """
@@ -310,6 +352,10 @@ class NewsClusterer:
             params = {}
             if before_id is not None:
                 params['before_entry_id'] = before_id
+            if self.config.miniflux_respect_hide_globally:
+                # Like Miniflux's own lists: no feeds or categories the user
+                # hid from them ('hide_globally')
+                params['globally_visible'] = True
             # Read entries are included so stories stay intact after reading
             page = self.client.get_entries(
                 status=['unread', 'read'],
@@ -585,6 +631,155 @@ class NewsClusterer:
         return len(to_mark)
 
 
+def create_client(config: Config, timeout: int = CLIENT_TIMEOUT) -> miniflux.Client:
+    """Create a Miniflux API client; each thread uses its own."""
+    if not config.miniflux_api_key:
+        raise ValueError("MINIFLUX_API_KEY not set. Please configure the API key.")
+    return miniflux.Client(config.miniflux_url, api_key=config.miniflux_api_key,
+                           timeout=timeout)
+
+
+def _set_topic_keys(clusters: list, topics: list) -> None:
+    """
+    Give clusters of the same topic group the same topic_key.
+
+    topics holds the topic label of each cluster (the one most of its
+    articles have; the looser pass contains the stories, so that is all of
+    them). The key is the smallest entry ID among the stories of a topic,
+    so it does not depend on how the clustering numbers its groups.
+    """
+    smallest = {}
+    for cluster, topic in zip(clusters, topics):
+        smallest[topic] = min(smallest.get(topic, min(cluster.entry_ids)),
+                              min(cluster.entry_ids))
+    for cluster, topic in zip(clusters, topics):
+        cluster.topic_key = int(smallest[topic])
+
+
+def section_of(entry: dict, path_sections: list) -> Optional[str]:
+    """
+    Section (Rubrik) of an entry, or None.
+
+    The title of its Miniflux category, unless that is the default
+    category ('All', 'Alle'), which says nothing. Otherwise the name of
+    the first pattern of path_sections, a list of (compiled regex, name),
+    that matches a whole segment of the URL path, such as 'sport' in
+    tagesschau.de/sport/fussball/... The last segment names the article
+    itself and is skipped. Entries without a feed, category or URL (test
+    fixtures, other clients) simply have no section.
+    """
+    feed = entry.get('feed')
+    category = feed.get('category') if isinstance(feed, dict) else None
+    title = category.get('title') if isinstance(category, dict) else None
+    if isinstance(title, str) and title.strip() \
+            and title.strip().casefold() not in DEFAULT_CATEGORIES:
+        return title.strip()[:MAX_SECTION_CHARS]
+    url = entry.get('url')
+    try:
+        path = urlsplit(url).path if isinstance(url, str) else ''
+    except ValueError:
+        return None
+    segments = [unquote(segment) for segment in path.split('/') if segment][:-1]
+    for pattern, name in path_sections:
+        if any(pattern.fullmatch(segment) for segment in segments):
+            return name
+    return None
+
+
+class StatusSync:
+    """
+    Take over articles read in Miniflux between clustering runs.
+
+    Asks Miniflux only for entries of the window marked read since the
+    last sync (changed_after; SetEntriesStatus updates changed_at), a page
+    at a time, and only updates entries that are stored. A clustering run
+    may store statuses it fetched before this sync ran; after each new run
+    the sync therefore starts again from that run's fetch time.
+    """
+
+    def __init__(self, config: Config, store: StoryStore, client):
+        self.config = config
+        self.store = store
+        self.client = client
+        # Marks made in Miniflux up to this time are stored
+        self.synced_until: Optional[datetime] = None
+        # Fetch time of the clustering run the last sync saw
+        self.seen_fetch: Optional[datetime] = None
+
+    def run(self) -> int:
+        """
+        Sync once.
+
+        Returns:
+            Number of stored entries that turned read.
+        """
+        started = datetime.now(timezone.utc)
+        fetched = parse_date(self.store.get_meta('last_fetch_at'))
+        if fetched is None:
+            return 0  # no clustering run yet, and it fetches every status itself
+        since = self.synced_until
+        if fetched != self.seen_fetch:
+            since = fetched if since is None else min(since, fetched)
+
+        scheduling = self.config.scheduling
+        cutoff = started - timedelta(hours=scheduling.lookback_hours)
+        limit = scheduling.batch_size
+        read_ids = set()
+        after_id = None
+        for _ in range(-(-scheduling.max_entries // limit)):
+            params = {} if after_id is None else {'after_entry_id': after_id}
+            page = self.client.get_entries(
+                status='read',
+                changed_after=int((since - STATUS_SYNC_OVERLAP).timestamp()),
+                published_after=int(cutoff.timestamp()),
+                order='id',
+                direction='asc',
+                limit=limit,
+                **params,
+            )
+            batch = [e['id'] for e in page.get('entries') or []]
+            if not batch or read_ids.issuperset(batch):
+                break  # done, or the server ignored after_entry_id
+            read_ids.update(batch)
+            if len(batch) < limit:
+                break
+            after_id = max(batch)
+        else:
+            logger.info("Status sync stopped after %d entries; the next clustering run "
+                        "takes over the rest", len(read_ids))
+
+        updated = self.store.set_read(sorted(read_ids))
+        self.synced_until = started
+        self.seen_fetch = fetched
+        if updated:
+            logger.info("Status sync: %d articles were read in Miniflux", updated)
+        return updated
+
+
+def run_status_sync(config: Config, store: StoryStore, stop: threading.Event,
+                    make_client: Callable[[], object]) -> None:
+    """
+    Run StatusSync every scheduling.status_sync_minutes until stopped.
+
+    Never raises: a failure is logged, and the wait doubles up to
+    STATUS_SYNC_MAX_BACKOFF intervals, so an unreachable Miniflux is not
+    asked more often. Runs in a thread of its own; clustering and the web
+    interface do not wait for it.
+    """
+    interval = config.scheduling.status_sync_minutes * 60
+    delay = interval
+    sync = None
+    while not stop.wait(delay):
+        try:
+            if sync is None:
+                sync = StatusSync(config, store, make_client())
+            sync.run()
+            delay = interval
+        except Exception as e:
+            delay = min(delay * 2, interval * STATUS_SYNC_MAX_BACKOFF)
+            logger.warning("Status sync with Miniflux failed, next try in %d s: %s", delay, e)
+
+
 def check_api_key_user(client) -> bool:
     """
     Warn when MINIFLUX_API_KEY belongs to a Miniflux admin.
@@ -763,6 +958,19 @@ def main():
     )
     scheduler.start()
 
+    # Clients of their own, so a long clustering run never holds up the
+    # web interface or the status sync
+    web_client = None
+    if config.miniflux_api_key:
+        web_client = create_client(config, WEB_CLIENT_TIMEOUT)
+        if config.scheduling.status_sync_minutes:
+            threading.Thread(
+                target=run_status_sync,
+                args=(config, store, stop, lambda: create_client(config, WEB_CLIENT_TIMEOUT)),
+                name='status-sync',
+                daemon=True,
+            ).start()
+
     # Docker sends SIGTERM; exit promptly instead of waiting for SIGKILL
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
@@ -771,7 +979,7 @@ def main():
 
     logger.info("Top Stories available on port %d", config.web.port)
     try:
-        serve(create_app(config, store), host=config.web.host, port=config.web.port,
+        serve(create_app(config, store, web_client), host=config.web.host, port=config.web.port,
               threads=4, ident='aRSSe')
     finally:
         stop.set()

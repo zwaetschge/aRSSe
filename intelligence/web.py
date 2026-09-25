@@ -2,7 +2,9 @@
 Top Stories web interface for the aRSSe Intelligence Layer.
 
 Server-rendered, JavaScript-free and without external resources, so it
-works on E-Ink readers and behind restrictive networks alike.
+works on E-Ink readers and behind restrictive networks alike. The only
+state-changing route, 'Story gelesen', is a plain form (POST) that marks
+the story's unread articles read in Miniflux.
 """
 
 import hmac
@@ -11,18 +13,19 @@ import logging
 import mimetypes
 import os
 import re
+import threading
 from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
 from typing import Optional
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from flask import (Flask, Response, abort, g, jsonify, redirect, render_template,
                    request, send_from_directory, url_for)
 from jinja2 import BaseLoader
 from markupsafe import Markup
 
-from config import Config, WebAuthConfig, resolve_timezone
-from store import StoryStore, parse_date, select_coverage
+from config import MAX_SECTION_CHARS, Config, WebAuthConfig, resolve_timezone
+from store import MAX_QUERY_CHARS, StoryStore, parse_date, select_coverage
 
 logger = logging.getLogger('arsse-intelligence')
 
@@ -57,6 +60,13 @@ mimetypes.add_type('application/manifest+json', '.webmanifest')
 AUTO_REFRESH_SECONDS = 1800
 # An untitled article is labelled with this many characters of its text
 UNTITLED_LABEL_CHARS = 80
+# Shorter search queries match nearly everything
+MIN_QUERY_CHARS = 2
+# 'Mehr zum Thema' links under a story on the front page; its story page
+# lists all related stories
+RELATED_ON_FRONT_PAGE = 3
+# Longest redirect target accepted after 'Story gelesen'
+MAX_NEXT_CHARS = 2000
 
 WEEKDAYS = ('Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So')
 WEEKDAY_NAMES = ('Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag',
@@ -141,6 +151,25 @@ def display_title(article: Optional[dict], with_feed: bool = True) -> str:
         snippet = snippet[:UNTITLED_LABEL_CHARS].rsplit(' ', 1)[0].rstrip(' .,;:') + ' …'
     feed = (article.get('feed_title') or '').strip()
     return f'{feed}: {snippet}' if with_feed and feed else snippet
+
+
+def safe_next(value: Optional[str]) -> str:
+    """
+    Where to return after a form: a path on this server, else '/'.
+
+    Only paths starting with a single '/' are accepted; '//host' and
+    '/\\host' would lead browsers to another site (open redirect), and
+    control characters have no place in a Location header.
+    """
+    if (not value or len(value) > MAX_NEXT_CHARS or not value.startswith('/')
+            or value.startswith('//') or '\\' in value
+            or any(ord(c) < 0x20 or ord(c) == 0x7f for c in value)):
+        return '/'
+    return value
+
+
+def _text_response(text: str, status: int) -> Response:
+    return Response(text + '\n', status, {'Content-Type': 'text/plain; charset=utf-8'})
 
 
 def _unauthorized() -> Response:
@@ -249,8 +278,13 @@ class DedentLoader(BaseLoader):
         return self.loader.list_templates()
 
 
-def create_app(config: Config, store: StoryStore) -> Flask:
-    """Create the Flask application."""
+def create_app(config: Config, store: StoryStore, client=None) -> Flask:
+    """
+    Create the Flask application.
+
+    client is a Miniflux client for 'Story gelesen'; without one (no API
+    key) the button is not shown.
+    """
     app = Flask(__name__, static_folder=STATIC_DIR)
     # Template indentation is not sent: every KB counts on E-Ink readers
     app.jinja_env.trim_blocks = True
@@ -270,6 +304,7 @@ def create_app(config: Config, store: StoryStore) -> Flask:
                        "devices use.", public_url, config.miniflux_public_port)
     base_path = urlsplit(public_url).path.rstrip('/') if loopback else ''
 
+    client_lock = threading.Lock()
     auth = config.web.auth
     trusted_networks = [ipaddress.ip_network(n, strict=False) for n in auth.trusted_proxies]
     allowed_hosts = ({h.lower() for h in config.web.allowed_hosts} | set(LOOPBACK_HOSTS)
@@ -374,34 +409,63 @@ def create_app(config: Config, store: StoryStore) -> Flask:
             args['auto'] = 1
         return f"{path}?{urlencode(args)}" if args else path
 
+    def here() -> str:
+        """This page's path and query, to return to after a form."""
+        query = request.query_string.decode('latin-1')
+        return request.path + ('?' + query if query else '')
+
     @app.context_processor
     def helpers():
         return {'entry_link': entry_link, 'safe_url': safe_url, 'miniflux_url': miniflux_base(),
                 'display_title': display_title, 'select_coverage': select_coverage,
-                'timeline': timeline, 'nav': nav,
+                'timeline': timeline, 'nav': nav, 'here': here,
+                'can_mark_read': client is not None,
                 'auto_refresh': AUTO_REFRESH_SECONDS if always_on() else None}
 
-    def top_stories() -> list:
-        return store.top_stories(max_age_hours, config.web.max_stories,
-                                 config.web.min_sources, config.web.earlier_articles_max,
-                                 config.web.exclude_patterns)
+    def listing_args(section: Optional[str], show_read: bool) -> dict:
+        """Query arguments that select a front page: section and read stories."""
+        args = {}
+        if section is not None:
+            args['rubrik'] = section
+        if show_read:
+            args['alle'] = 1
+        return args
 
-    def page_url(page: int) -> str:
-        """Link to another page of the front page, keeping ?auto=1."""
-        return nav(url_for('index'), **({'seite': page} if page > 1 else {}))
-
-    @app.get('/')
-    def index():
+    def page_number() -> int:
+        """?seite=N as a number; anything else is not a page (404)."""
         page = request.args.get('seite', '1')
         if not re.fullmatch(r'[1-9][0-9]{0,5}', page):
             abort(404)
-        page = int(page)
+        return int(page)
+
+    def show_read() -> bool:
+        """?alle=1: list stories whose articles are all read, too."""
+        return request.args.get('alle') == '1'
+
+    def chosen_section() -> Optional[str]:
+        """?rubrik=Name, or None for all sections."""
+        section = request.args.get('rubrik') or None
+        if section is not None and len(section) > MAX_SECTION_CHARS:
+            abort(404)
+        return section
+
+    @app.get('/')
+    def index():
+        page = page_number()
+        section = chosen_section()
+        everything = show_read()
+        args = listing_args(section, everything)
+
+        def page_url(number: int) -> str:
+            """Link to another page of this listing, keeping ?auto=1."""
+            return nav(url_for('index'), **args, **({'seite': number} if number > 1 else {}))
+
         page_size = config.web.page_size
-        stories, total = store.top_stories_page(
+        front = store.front_page(
             max_age_hours, config.web.max_stories, (page - 1) * page_size, page_size,
             config.web.min_sources, config.web.earlier_articles_max,
-            config.web.exclude_patterns)
-        pages = max(1, -(-total // page_size))
+            config.web.exclude_patterns, section=section, hide_read=not everything)
+        pages = max(1, -(-front.total // page_size))
         if page > pages:
             # An always-on display stays on the page it paged to; when stories
             # age out it must land on the last page, not a 404 that never reloads
@@ -410,13 +474,20 @@ def create_app(config: Config, store: StoryStore) -> Flask:
             abort(404)
         return render_template(
             'index.html',
-            stories=stories,
-            total=total,
+            stories=front.stories,
+            total=front.total,
+            sections=front.sections,
+            section=section,
+            show_read=everything,
+            hidden_read=front.hidden_read,
+            section_url=lambda name: nav(url_for('index'), **listing_args(name, everything)),
+            read_toggle_url=nav(url_for('index'), **listing_args(section, not everything)),
             page=page,
             pages=pages,
             prev_url=page_url(page - 1) if page > 1 else None,
             next_url=page_url(page + 1) if page < pages else None,
             per_story=config.web.articles_per_story,
+            related_max=RELATED_ON_FRONT_PAGE,
             last_success=store.get_meta('last_success'),
         )
 
@@ -426,21 +497,117 @@ def create_app(config: Config, store: StoryStore) -> Flask:
         if not found:
             # The story aged out while an always-on display showed it
             if always_on():
-                return redirect(page_url(1))
+                return redirect(nav(url_for('index')))
             abort(404)
         chronological = request.args.get('ansicht') == 'chronologisch'
         return render_template(
             'story.html',
             story=found,
             chronological=chronological,
+            related=store.related_stories(found, max_age_hours, config.web.min_sources,
+                                          0, config.web.exclude_patterns),
             # An always-on display returns to the front page instead of
             # showing the story someone tapped into forever
-            refresh_url=page_url(1),
+            refresh_url=nav(url_for('index')),
             # Oldest and newest article in the window (articles are newest first)
             first=found['articles'][-1],
             last=found['articles'][0],
             originals=[a for a in found['articles'] if not a['is_duplicate']],
             duplicates=[a for a in found['articles'] if a['is_duplicate']],
+        )
+
+    def last_page_if_gone(target: str) -> str:
+        """
+        target, or the last page of its front page if that page is gone.
+
+        Marking the only story of the last page read removes the page;
+        returning there would be a 404.
+        """
+        parts = urlsplit(target)
+        args = dict(parse_qsl(parts.query))
+        page = args.get('seite', '')
+        if parts.path != url_for('index') or not re.fullmatch(r'[1-9][0-9]{0,5}', page) \
+                or page == '1':
+            return target
+        section = args.get('rubrik') or None
+        if section is not None and len(section) > MAX_SECTION_CHARS:
+            return target
+        total = store.front_page(
+            max_age_hours, config.web.max_stories, 0, 0, config.web.min_sources, 0,
+            config.web.exclude_patterns, section=section,
+            hide_read=args.get('alle') != '1').total
+        pages = max(1, -(-total // config.web.page_size))
+        if int(page) <= pages:
+            return target
+        if pages > 1:
+            args['seite'] = str(pages)
+        else:
+            del args['seite']
+        return parts.path + ('?' + urlencode(args) if args else '')
+
+    @app.post('/story/<story_id>/gelesen')
+    def mark_story_read(story_id: str):
+        """
+        'Story gelesen': mark the story's unread articles read in Miniflux.
+
+        Only articles inside the window count, as everywhere on the front
+        page. They are recorded as read by the user (user_read), not as
+        duplicates aRSSe marked (auto_marked). Answers 303 to the page the
+        form came from (next).
+        """
+        # The before_request guard checked login and origin already; a
+        # route that writes to the user's Miniflux checks the origin again
+        require_same_origin()
+        target = safe_next(request.form.get('next'))
+        if client is None:
+            return _text_response('Kein MINIFLUX_API_KEY gesetzt – Stories lassen sich nicht '
+                                  'als gelesen markieren.', 503)
+        found = store.get_story(story_id, max_age_hours, 0)
+        unread = [a['id'] for a in found['articles'] if a['status'] == 'unread'] \
+            if found else []
+        if unread:
+            try:
+                # One requests session for all web threads: calls take turns
+                with client_lock:
+                    client.update_entries(unread, status='read')
+            except Exception as e:
+                logger.warning("Could not mark story %s read in Miniflux: %s", story_id, e)
+                return _text_response('Miniflux ist nicht erreichbar – die Story wurde nicht '
+                                      'als gelesen markiert. Bitte später erneut versuchen.',
+                                      502)
+            store.mark_read(unread)
+            logger.info("Marked %d articles of story %s read", len(unread), story_id)
+        return redirect(last_page_if_gone(target), code=303)
+
+    @app.get('/suche')
+    def search():
+        query = (request.args.get('q') or '').strip()
+        page = page_number()
+        valid = MIN_QUERY_CHARS <= len(query) <= MAX_QUERY_CHARS
+        results = store.search(query, max_age_hours, config.web.max_stories,
+                               config.web.min_sources, config.web.exclude_patterns) \
+            if valid else []
+        page_size = config.web.page_size
+        pages = max(1, -(-len(results) // page_size))
+        if page > pages:
+            abort(404)
+
+        def page_url(number: int) -> str:
+            return nav(url_for('search'), q=query, **({'seite': number} if number > 1 else {}))
+
+        return render_template(
+            'search.html',
+            query=query if valid else '',
+            too_long=len(query) > MAX_QUERY_CHARS,
+            stories=results[(page - 1) * page_size:page * page_size],
+            total=len(results),
+            page=page,
+            pages=pages,
+            prev_url=page_url(page - 1) if page > 1 else None,
+            next_url=page_url(page + 1) if page < pages else None,
+            per_story=config.web.articles_per_story,
+            miniflux_search=f"{miniflux_base()}/search?{urlencode({'q': query})}"
+            if valid else None,
         )
 
     @app.get('/favicon.ico')
@@ -450,7 +617,11 @@ def create_app(config: Config, store: StoryStore) -> Flask:
 
     @app.get('/api/stories')
     def api_stories():
-        return jsonify(top_stories())
+        """All listed stories, flat (no pages, no topic groups); ?rubrik= and ?alle=1."""
+        return jsonify(store.top_stories(
+            max_age_hours, config.web.max_stories, config.web.min_sources,
+            config.web.earlier_articles_max, config.web.exclude_patterns,
+            section=chosen_section(), hide_read=not show_read()))
 
     @app.get('/healthz')
     def healthz():

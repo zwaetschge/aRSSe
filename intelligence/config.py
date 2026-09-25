@@ -61,6 +61,25 @@ DEFAULT_NOISE_TITLE_PATTERNS = [
     r'Briefing',
 ]
 
+# Sections (Rubriken) from URL path segments, for feeds in Miniflux's default
+# category: regular expression for one whole segment -> section name. The
+# first pattern (in this order) that matches any segment of the path wins,
+# so the specific ones come before the broad 'Politik'.
+DEFAULT_PATH_SECTIONS = {
+    r'regional(es)?|baden-wuerttemberg|bayern|berlin(-brandenburg)?|brandenburg|bremen'
+    r'|hamburg(-schleswig-holstein)?|hessen|mecklenburg-vorpommern|niedersachsen'
+    r'|nordrhein-westfalen|nrw|rheinland-pfalz|saarland|sachsen|sachsen-anhalt'
+    r'|schleswig-holstein|th(ue|ü)ringen': 'Regional',
+    r'sport|fussball\w*': 'Sport',
+    r'wissen|technik|digital|netzwelt': 'Technik',
+    r'wirtschaft|finanzen': 'Wirtschaft',
+    r'kultur|feuilleton': 'Kultur',
+    r'panorama|gesellschaft': 'Panorama',
+    r'politik|inland|ausland': 'Politik',
+}
+# Longest section name accepted (the nav row has to fit an E-Ink screen)
+MAX_SECTION_CHARS = 40
+
 
 class ConfigError(ValueError):
     """A setting is invalid; the message names the setting."""
@@ -80,6 +99,10 @@ class ClusteringConfig:
     # linkage accepts any pair above 1 - threshold (0.25), which one shared
     # rare word reaches; 0 disables the check.
     min_pair_similarity: float = 0.30
+    # Maximum average cosine distance of the articles of one topic: stories
+    # of one topic (the same event from different angles) take one slot on
+    # the front page. Must be above threshold; 0 disables topics.
+    topic_threshold: float = 0.9
     # Regular expressions (case-insensitive) for titles that never head a
     # story while another article can (see DEFAULT_NOISE_TITLE_PATTERNS)
     noise_title_patterns: list = field(
@@ -109,6 +132,9 @@ class SchedulingConfig:
     batch_size: int = 250
     max_entries: int = 2000
     lookback_hours: int = 24
+    # Minutes between light checks for articles read in Miniflux, so a story
+    # read there leaves the front page before the next clustering run; 0 = off
+    status_sync_minutes: int = 5
 
 
 @dataclass
@@ -158,6 +184,9 @@ class WebConfig:
     # Time zone of the times shown (IANA name, e.g. Europe/Berlin);
     # empty = the TZ environment variable, else DEFAULT_TIMEZONE
     timezone: str = ""
+    # Sections of articles in Miniflux's default category, from URL path
+    # segments (see DEFAULT_PATH_SECTIONS); {} = only Miniflux categories
+    path_sections: dict = field(default_factory=lambda: dict(DEFAULT_PATH_SECTIONS))
     auth: WebAuthConfig = field(default_factory=WebAuthConfig)
 
 
@@ -178,6 +207,9 @@ class Config:
     miniflux_public_url: str = "http://localhost:8080"
     # Host port of Miniflux; used for links when public_url is a loopback address
     miniflux_public_port: int = 8080
+    # Leave out articles of feeds and categories hidden from Miniflux's
+    # global views ('hide_globally'), as Miniflux's own lists do
+    miniflux_respect_hide_globally: bool = True
     clustering: ClusteringConfig = field(default_factory=ClusteringConfig)
     deduplication: DeduplicationConfig = field(default_factory=DeduplicationConfig)
     scheduling: SchedulingConfig = field(default_factory=SchedulingConfig)
@@ -258,6 +290,8 @@ def _apply_yaml_config(config: Config, yaml_config: dict) -> None:
         config.miniflux_public_url = miniflux.get('public_url', config.miniflux_public_url)
         config.miniflux_public_port = _parse_port(
             miniflux.get('public_port'), 'miniflux.public_port', config.miniflux_public_port)
+        config.miniflux_respect_hide_globally = miniflux.get(
+            'respect_hide_globally', config.miniflux_respect_hide_globally)
 
 
 def _parse_port(value, name: str, default: int) -> int:
@@ -308,6 +342,9 @@ def _apply_env_config(config: Config) -> None:
     if similarity := _env('CLUSTERING_MIN_PAIR_SIMILARITY'):
         config.clustering.min_pair_similarity = _env_number(
             'CLUSTERING_MIN_PAIR_SIMILARITY', similarity, float)
+    if topic := _env('CLUSTERING_TOPIC_THRESHOLD'):
+        config.clustering.topic_threshold = _env_number('CLUSTERING_TOPIC_THRESHOLD',
+                                                        topic, float)
     for obsolete in ('CLUSTERING_EPS', 'CLUSTERING_MIN_SAMPLES'):
         if _env(obsolete):
             logger.warning("%s is obsolete and ignored; use CLUSTERING_THRESHOLD", obsolete)
@@ -383,12 +420,14 @@ _NUMERIC_FIELDS = (
     ('clustering.max_features', ('clustering', 'max_features'), True),
     ('clustering.ngram_max', ('clustering', 'ngram_max'), True),
     ('clustering.min_pair_similarity', ('clustering', 'min_pair_similarity'), False),
+    ('clustering.topic_threshold', ('clustering', 'topic_threshold'), False),
     ('deduplication.threshold', ('deduplication', 'threshold'), False),
     ('deduplication.min_body_tokens', ('deduplication', 'min_body_tokens'), True),
     ('scheduling.interval_minutes', ('scheduling', 'interval_minutes'), True),
     ('scheduling.batch_size', ('scheduling', 'batch_size'), True),
     ('scheduling.max_entries', ('scheduling', 'max_entries'), True),
     ('scheduling.lookback_hours', ('scheduling', 'lookback_hours'), True),
+    ('scheduling.status_sync_minutes', ('scheduling', 'status_sync_minutes'), True),
     ('storage.retention_days', ('storage', 'retention_days'), True),
     ('web.max_stories', ('web', 'max_stories'), True),
     ('web.page_size', ('web', 'page_size'), True),
@@ -448,6 +487,30 @@ def _pattern_list(name: str, value) -> list:
             raise ConfigError(f"{name}: '{pattern}' is not a valid regular expression "
                               f"({e})") from None
     return patterns
+
+
+def _path_sections(value) -> dict:
+    """Check web.path_sections: regular expression -> section name."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"web.path_sections must map regular expressions to section "
+                          f"names (e.g. 'sport|fussball': Sport), got {value!r}")
+    sections = {}
+    for pattern, section in value.items():
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise ConfigError(f"web.path_sections: {pattern!r} is not a regular expression")
+        if not isinstance(section, str) or not section.strip() \
+                or len(section.strip()) > MAX_SECTION_CHARS:
+            raise ConfigError(f"web.path_sections: '{pattern}' needs a section name of at "
+                              f"most {MAX_SECTION_CHARS} characters, got {section!r}")
+        try:
+            re.compile(pattern, re.IGNORECASE)
+        except re.error as e:
+            raise ConfigError(f"web.path_sections: '{pattern}' is not a valid regular "
+                              f"expression ({e})") from None
+        sections[pattern] = section.strip()
+    return sections
 
 
 def _host_name(name: str, value: str) -> str:
@@ -603,12 +666,21 @@ def _validate(config: Config) -> None:
                           f"got {config.clustering.ngram_max}")
     if not 0.0 <= config.clustering.min_pair_similarity < 1.0:
         raise ConfigError("clustering.min_pair_similarity must be in [0, 1)")
+    topic = config.clustering.topic_threshold
+    if topic != 0 and not config.clustering.threshold < topic < 1.0:
+        raise ConfigError(f"clustering.topic_threshold must be above clustering.threshold "
+                          f"({config.clustering.threshold}) and below 1, or 0 (off); "
+                          f"got {topic}")
     config.clustering.noise_title_patterns = _pattern_list(
         'clustering.noise_title_patterns', config.clustering.noise_title_patterns)
     config.web.exclude_patterns = _pattern_list('web.exclude_patterns',
                                                 config.web.exclude_patterns)
     if not 0 < config.miniflux_public_port < 65536:
         raise ConfigError("miniflux.public_port must be a TCP port (1-65535)")
+    if not isinstance(config.miniflux_respect_hide_globally, bool):
+        raise ConfigError(f"miniflux.respect_hide_globally must be true or false, got "
+                          f"{config.miniflux_respect_hide_globally!r}")
+    config.web.path_sections = _path_sections(config.web.path_sections)
     if config.web.min_sources < 1:
         raise ConfigError("web.min_sources must be at least 1")
     if config.web.max_stories < 1:
@@ -635,6 +707,8 @@ def _validate(config: Config) -> None:
                           f"{MAX_ENTRIES_LIMIT}, got {scheduling.max_entries}")
     if scheduling.lookback_hours < 1:
         raise ConfigError("scheduling.lookback_hours must be at least 1")
+    if scheduling.status_sync_minutes < 0:
+        raise ConfigError("scheduling.status_sync_minutes must not be negative (0 = off)")
     retention_days = config.storage.retention_days
     if retention_days < 1:
         raise ConfigError("storage.retention_days must be at least 1")

@@ -86,10 +86,10 @@ Miniflux ist ein minimalistischer RSS-Reader, geschrieben in Go. Er dient als ze
 
 Der Python-Service läuft zyklisch (Standard: alle 30 Minuten) und führt folgende Schritte aus:
 
-1. **Extraction**: Abruf aller Artikel der letzten 24 Stunden via Miniflux API (gelesen und ungelesen, seitenweise nach Artikel-ID – auch bei gleichen Veröffentlichungszeiten kommt kein Artikel doppelt)
+1. **Extraction**: Abruf aller Artikel der letzten 24 Stunden via Miniflux API (gelesen und ungelesen, seitenweise nach Artikel-ID – auch bei gleichen Veröffentlichungszeiten kommt kein Artikel doppelt; Feeds und Kategorien, die in Miniflux aus den globalen Listen ausgeblendet sind, bleiben draußen)
 2. **Preprocessing**: HTML entfernen, Normalisierung, Stopwords, Stemming (Snowball)
 3. **Vectorization**: TF-IDF über Uni- und Bigramme
-4. **Clustering**: Agglomeratives Clustering (Average Linkage) gruppiert Artikel zum selben Ereignis zu einer *Story*
+4. **Clustering**: Agglomeratives Clustering (Average Linkage) gruppiert Artikel zum selben Ereignis zu einer *Story*; ein zweiter, großzügigerer Durchgang fasst Stories zu *Themen* zusammen (Klopps Debüt, seine Aufstellung, der gegnerische Trainer)
 5. **Deduplication**: Near-Duplicates (z.B. identische Agenturmeldungen verschiedener Feeds, verglichen ohne Titel) und doppelt gelieferte Artikel innerhalb einer Story
 6. **Persistence**: Stories landen in einer lokalen SQLite-Datenbank (`data/intelligence/arsse.db`) mit über Läufe hinweg stabilen IDs; Duplikate werden optional in Miniflux als gelesen markiert – standardmäßig nur in Stories, die die Startseite zeigt (doppelt gelieferte Artikel überall), und jedes nur einmal: Wer ein Duplikat wieder auf ungelesen setzt, behält es ungelesen. Artikel im Zeitfenster, die es in Miniflux nicht mehr gibt (z.B. nach „Verlauf leeren“ oder dem Abbestellen eines Feeds), verschwinden beim nächsten Lauf aus ihren Stories; ältere Artikel unter „Frühere Berichte“ verlinken deshalb auf das Original beim Anbieter. Nach einem Update passt der Service das Schema der Datenbank beim Start selbst an
 
@@ -97,13 +97,19 @@ Die Miniflux-API kann keine Tags oder eigenen Metadaten schreiben – deshalb br
 
 | Pfad | Inhalt |
 |------|--------|
-| `/` | Top Stories aus mindestens zwei Feeds, gerankt nach Anzahl der Quellen und Aktualität – gezählt wird nur, was im Zeitfenster (24 Stunden) erschienen ist. 10 Stories pro Seite (`?seite=2` usw.), insgesamt bis zu 100; `?auto=1` lädt die Seite alle 30 Minuten neu (für Always-on-Displays) |
-| `/story/<id>` | Alle Artikel einer Story im Zeitfenster mit erster und letzter Meldung, gleichlautende Meldungen zusammengeklappt, darunter bis zu 20 ältere als „Frühere Berichte“ (mit Link auf das Original). `?ansicht=chronologisch` zeigt den Verlauf von der ersten Meldung an, nach Tagen gruppiert |
-| `/api/stories` | Dieselben Daten als JSON (alle Stories, ohne Seiten) |
+| `/` | Top Stories aus mindestens zwei Feeds, gerankt nach Anzahl der Quellen und Aktualität – gezählt wird nur, was im Zeitfenster (24 Stunden) erschienen ist. Jedes Thema belegt einen Platz, verwandte Stories stehen darunter als „Mehr zum Thema“. 10 Plätze pro Seite (`?seite=2` usw.), insgesamt bis zu 100; `?rubrik=Sport` zeigt eine Rubrik, `?alle=1` auch gelesene Stories, `?auto=1` lädt die Seite alle 30 Minuten neu (für Always-on-Displays) |
+| `/story/<id>` | Alle Artikel einer Story im Zeitfenster mit erster und letzter Meldung, gleichlautende Meldungen zusammengeklappt, darunter bis zu 20 ältere als „Frühere Berichte“ (mit Link auf das Original) und „Verwandte Stories“. `?ansicht=chronologisch` zeigt den Verlauf von der ersten Meldung an, nach Tagen gruppiert |
+| `/story/<id>/gelesen` | Knopf „Story gelesen (N)“ (Formular, `POST`): markiert die ungelesenen Artikel der Story im Zeitfenster in Miniflux als gelesen |
+| `/suche?q=…` | Suche in Titeln und Anrissen aller gespeicherten Stories (auch älterer, `storage.retention_days`), 2 bis 100 Zeichen; darunter ein Link zur Volltextsuche von Miniflux |
+| `/api/stories` | Dieselben Daten als JSON (alle Stories einzeln, ohne Seiten und Themen; `?rubrik=` und `?alle=1` wie oben) |
 | `/healthz` | `200`, solange der letzte erfolgreiche Lauf weniger als drei Intervalle zurückliegt (immer ohne Anmeldung) |
 | `/static/…` | Manifest und Icons für den Startbildschirm (immer ohne Anmeldung, Icons holen Browser und Android teils ohne Zugangsdaten) |
 
 Die Seiten sind für E-Ink gebaut: kurze Seiten statt langem Scrollen, nur absolute Uhrzeiten („Stand 18:32“, „Mi 14:53“ – relative Angaben wie „vor 5 Min.“ stimmen auf einem stehenden Bildschirm bald nicht mehr), jede Quelle zuerst mit einem Artikel statt mehrerer aus demselben Feed, und Links, die als ganze Zeile mindestens 44 px hoch antippbar sind. Die Uhrzeiten gelten in der Zeitzone `TZ` aus `.env` (Standard Europe/Berlin) oder `web.timezone` in `config.yaml`.
+
+**Gelesen:** Eine Story, deren Artikel im Zeitfenster alle gelesen sind, verschwindet von der Startseite (die Statuszeile bietet „N gelesene zeigen“). „Story gelesen (N)“ markiert mit einem Tipp alle ungelesenen Artikel der Story in Miniflux als gelesen – statt neun fast gleicher Meldungen einzeln. Kommen danach neue Artikel hinzu, erscheint die Story wieder mit „N neu“. Was in Miniflux selbst gelesen wird, übernehmen die Top Stories alle 5 Minuten (`scheduling.status_sync_minutes`). Der Knopf braucht den `MINIFLUX_API_KEY`; ohne Anmeldung (`WEB_AUTH_MODE=none`) kann jeder, der den Port erreicht, Stories als gelesen markieren – fremde Webseiten können es nicht (siehe „Absicherung“).
+
+**Rubriken:** Politik, Sport, Technik, Regional usw. kommen aus der Kategorie des Feeds in Miniflux. Für Feeds in der Standardkategorie „All“ entscheidet der Pfad der Artikel-URL (`tagesschau.de/ausland/…` → Politik, `…/sport/…` → Sport; `web.path_sections` in `config.yaml`); eine Story gehört zur Rubrik der meisten ihrer Artikel.
 
 Links führen in Miniflux (`BASE_URL`), damit Gelesen-Status und Volltext erhalten bleiben. Zeigt `BASE_URL` auf `localhost`, verwenden die Links stattdessen die Adresse, unter der die Top Stories aufgerufen wurden, mit `MINIFLUX_PORT` (beim Start erscheint dazu eine Warnung im Log).
 
@@ -114,6 +120,7 @@ Links führen in Miniflux (`BASE_URL`), damit Gelesen-Status und Volltext erhalt
 clustering:
   threshold: 0.75                # max. durchschnittliche Kosinus-Distanz einer Story
   min_pair_similarity: 0.30      # Mindest-Ähnlichkeit einer Story aus nur zwei Artikeln
+  topic_threshold: 0.9           # Themen für „Mehr zum Thema“ (0 = aus)
   stemming: true
   # noise_title_patterns: Liste von Titelmustern (Werbung, Podcasts, Liveblogs …),
   # die keine Schlagzeile werden, solange die Story andere Artikel hat
@@ -126,6 +133,7 @@ deduplication:
 
 scheduling:
   interval_minutes: 30           # Ausführungsintervall
+  status_sync_minutes: 5         # in Miniflux Gelesenes übernehmen (0 = aus)
 
 web:
   page_size: 10                  # Stories pro Seite (WEB_PAGE_SIZE)
@@ -239,7 +247,7 @@ Danach `docker compose up -d intelligence`. Statt `WEB_PASSWORD` geht auch `WEB_
 
 **DNS-Rebinding:** Eine fremde Webseite kann ihren Namen auf die IP-Adresse Ihres Servers umbiegen und die Top Stories dann über Ihren Browser auslesen. `WEB_ALLOWED_HOSTS=tower.local,192.168.1.10` beantwortet nur Anfragen an diese Namen (`localhost` und `127.0.0.1` gehen immer), alle anderen mit `400`. Platzhalter wie `*.example.com` gibt es nicht – jeden Namen einzeln eintragen; IPv6-Adressen gehen mit oder ohne eckige Klammern.
 
-Unabhängig davon senden die Top Stories eine strikte Content-Security-Policy (kein JavaScript, keine fremden Inhalte, nicht in Frames einbettbar) und weitere Sicherheits-Header; Anfragen, die etwas verändern, nehmen sie nur von der eigenen Seite an (Schutz vor CSRF).
+Unabhängig davon senden die Top Stories eine strikte Content-Security-Policy (kein JavaScript, keine fremden Inhalte, nicht in Frames einbettbar) und weitere Sicherheits-Header; Anfragen, die etwas verändern („Story gelesen“), nehmen sie nur von der eigenen Seite an (Schutz vor CSRF): Ohne Anmeldung ist das der einzige Schutz davor, dass eine fremde Webseite in Ihrem Browser Stories als gelesen markiert.
 
 ### Eigener Miniflux-Benutzer für die Top Stories
 

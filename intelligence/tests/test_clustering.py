@@ -9,10 +9,9 @@ from pathlib import Path
 import miniflux
 import pytest
 
-from conftest import BUDGET, FakeClient, make_entry, sample_entries
+from conftest import BUDGET, FakeClient, downgrade_to_v2, make_entry, sample_entries
 from news_clustering import NewsClusterer, _norm_url
-import store as store_module
-from store import MIGRATIONS, ClusterResult, StoryStore, db_timestamp
+from store import ClusterResult, StoryStore, db_timestamp
 
 
 def run(config, store, entries):
@@ -557,16 +556,15 @@ def test_copy_joining_another_feeds_group_is_still_a_copy(config, store):
 
 
 @pytest.mark.parametrize('user_reset', [False, True])
-def test_upgrade_keeps_the_copy_the_old_version_left_unread(config, monkeypatch, user_reset):
+def test_upgrade_keeps_the_copy_the_old_version_left_unread(config, user_reset):
     # Before auto_marked existed, ties went to the highest ID: the old
     # version kept 2 and marked the identical copy 1 read. The first run
     # after the upgrade must not mark 2 as well, nor 1 again once the user
     # has set it back to unread.
     entries = sample_entries()[:3]
     entries[0]['status'] = 'read'
-    monkeypatch.setattr(store_module, 'MIGRATIONS', MIGRATIONS[:2])
     StoryStore(config.storage.db_path).save_run(entries, [ClusterResult([1, 2, 3], 2, {1})])
-    monkeypatch.undo()
+    downgrade_to_v2(config.storage.db_path)
 
     if user_reset:
         entries[0]['status'] = 'unread'

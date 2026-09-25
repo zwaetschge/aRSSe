@@ -9,6 +9,15 @@ ID of the previous story it continues (see _match_story_ids). Only
 articles inside the lookback window count for a story's sources and
 rank; older ones stay attached as earlier coverage until retention.
 
+Read state: a story whose articles in the window are all read leaves the
+front page (hide_read). Articles the user marked read with 'Story gelesen'
+are recorded in user_read, apart from the duplicates aRSSe marked itself
+(auto_marked), which rank last as a story's canonical article.
+
+Topics: stories about the same event from different angles share a
+topic_key; the front page shows the best-ranked one and lists the others
+as 'Mehr zum Thema' (group_topics).
+
 The schema is versioned with ``PRAGMA user_version``; see MIGRATIONS.
 """
 
@@ -106,6 +115,24 @@ INSERT INTO auto_marked (entry_id, marked_at)
 """
 
 
+# Sections (Rubriken), topics and the user's read marks. user_read holds the
+# articles the user marked read with 'Story gelesen' (never auto_marked
+# duplicates); read_at uses the format of db_timestamp(). The index serves
+# the per-article retention cleanup and the time window.
+SCHEMA_V4 = """
+ALTER TABLE entries ADD COLUMN section TEXT;
+ALTER TABLE stories ADD COLUMN topic_key INTEGER;
+CREATE INDEX idx_entries_published ON entries(published_at);
+CREATE TABLE user_read (
+    entry_id INTEGER PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+    read_at  TEXT NOT NULL
+);
+"""
+
+# Longest search query accepted (/suche)
+MAX_QUERY_CHARS = 100
+
+
 class _Rebuild:
     def __repr__(self) -> str:
         return 'REBUILD'
@@ -125,6 +152,7 @@ MIGRATIONS = [
     SCHEMA_V1,
     SCHEMA_V2,
     SCHEMA_V3,
+    SCHEMA_V4,
 ]
 
 
@@ -158,6 +186,22 @@ class ClusterResult:
     # Members unfit to head the story: no title, or a title matching
     # clustering.noise_title_patterns (ads, podcasts, live blogs, ...)
     noise_ids: set = field(default_factory=set)
+    # Stories with the same topic_key are about one event (the smallest
+    # entry ID of their topic group); None = a topic of its own
+    topic_key: Optional[int] = None
+
+
+@dataclass
+class FrontPage:
+    """One page of the front page (StoryStore.front_page)."""
+    # Best-ranked story of each topic on this page, the rest in 'related'
+    stories: list
+    # Topic groups on all pages (what the pages count)
+    total: int
+    # [(section, topic groups)], most first; counts ignore the chosen section
+    sections: list = field(default_factory=list)
+    # Stories left out because all their articles in the window are read
+    hidden_read: int = 0
 
 
 def _now() -> str:
@@ -285,10 +329,10 @@ class StoryStore:
             conn.executemany(
                 """INSERT INTO entries (id, feed_id, feed_title, title, url,
                                         published_at, published_at_raw, created_at,
-                                        snippet, status)
+                                        snippet, status, section)
                    VALUES (:id, :feed_id, :feed_title, :title, :url,
                            :published_at, :published_at_raw, :created_at,
-                           :snippet, :status)
+                           :snippet, :status, :section)
                    ON CONFLICT(id) DO UPDATE SET
                        feed_title = excluded.feed_title,
                        title = excluded.title,
@@ -301,7 +345,14 @@ class StoryStore:
                        published_at_raw = excluded.published_at_raw,
                        created_at = excluded.created_at,
                        snippet = excluded.snippet,
-                       status = excluded.status""",
+                       section = excluded.section,
+                       -- The user marked it read after this fetch: the
+                       -- fetched 'unread' is out of date
+                       status = CASE WHEN excluded.status = 'unread' AND EXISTS (
+                                         SELECT 1 FROM user_read u
+                                         WHERE u.entry_id = entries.id
+                                           AND u.read_at >= :fetched_at)
+                                     THEN 'read' ELSE excluded.status END""",
                 rows,
             )
 
@@ -323,15 +374,17 @@ class StoryStore:
             for idx, cluster in enumerate(clusters):
                 story_id = assigned[idx]
                 conn.execute(
-                    """INSERT INTO stories (id, headline_entry_id, first_seen, last_seen)
-                       VALUES (?, ?, ?, ?)
+                    """INSERT INTO stories (id, headline_entry_id, first_seen, last_seen,
+                                            topic_key)
+                       VALUES (?, ?, ?, ?, ?)
                        ON CONFLICT(id) DO UPDATE SET
                            headline_entry_id = excluded.headline_entry_id,
-                           last_seen = excluded.last_seen""",
+                           last_seen = excluded.last_seen,
+                           topic_key = excluded.topic_key""",
                     (story_id,
                      _sticky_headline(cluster, previous.get(story_id)) if sticky_headline
                      else cluster.headline_entry_id,
-                     now, now),
+                     now, now, cluster.topic_key),
                 )
                 conn.executemany(
                     "INSERT INTO story_entries (entry_id, story_id, is_duplicate) "
@@ -355,6 +408,34 @@ class StoryStore:
                              [(i,) for i in entry_ids])
             conn.executemany("INSERT OR REPLACE INTO auto_marked (entry_id, marked_at) "
                              "VALUES (?, ?)", [(i, marked_at) for i in entry_ids])
+
+    def mark_read(self, entry_ids: list) -> None:
+        """
+        Record that the user marked entries read in Miniflux ('Story gelesen').
+
+        Kept in user_read, not auto_marked: those are duplicates aRSSe marked
+        itself, which rank last as canonical article and are never marked
+        again. Entries that are not stored are skipped.
+        """
+        read_at = db_timestamp(datetime.now(timezone.utc))
+        with self._connect() as conn:
+            conn.executemany("UPDATE entries SET status = 'read' WHERE id = ?",
+                             [(i,) for i in entry_ids])
+            conn.executemany("INSERT OR REPLACE INTO user_read (entry_id, read_at) "
+                             "SELECT id, ? FROM entries WHERE id = ?",
+                             [(read_at, i) for i in entry_ids])
+
+    def set_read(self, entry_ids: Iterable[int]) -> int:
+        """
+        Take over read marks made in Miniflux (status sync) for stored entries.
+
+        Returns:
+            Number of stored entries that were unread until now.
+        """
+        with self._connect() as conn:
+            return sum(conn.execute("UPDATE entries SET status = 'read' "
+                                    "WHERE id = ? AND status != 'read'", (i,)).rowcount
+                       for i in entry_ids)
 
     def refresh_auto_marked(self, fetched_ids: list) -> None:
         """
@@ -414,7 +495,8 @@ class StoryStore:
 
     def top_stories(self, max_age_hours: int, limit: int, min_sources: int = 1,
                     earlier_max: int = EARLIER_ARTICLES_MAX,
-                    exclude_patterns: Iterable[str] = ()) -> list:
+                    exclude_patterns: Iterable[str] = (), section: Optional[str] = None,
+                    hide_read: bool = False) -> list:
         """
         Return ranked stories with their articles.
 
@@ -424,8 +506,101 @@ class StoryStore:
         article. Older articles are listed in 'earlier_articles'.
         Stories whose articles all have a title matching one of
         exclude_patterns (regular expressions, case-insensitive; e.g. the
-        weather report) are left out.
+        weather report) are left out. With section, only stories of that
+        section are returned; with hide_read, only stories with an unread
+        article in the window.
         """
+        stories = self._ranked(max_age_hours, min_sources, earlier_max, exclude_patterns)
+        return [s for s in stories
+                if (not hide_read or s['unread_count'])
+                and (section is None or s['section'] == section)][:limit]
+
+    def front_page(self, max_age_hours: int, limit: int, offset: int, page_size: int,
+                   min_sources: int = 1, earlier_max: int = EARLIER_ARTICLES_MAX,
+                   exclude_patterns: Iterable[str] = (), section: Optional[str] = None,
+                   hide_read: bool = False) -> FrontPage:
+        """
+        One page of the front page: ranked stories grouped by topic.
+
+        Every topic takes one slot (group_topics), and pages, total and
+        limit count these slots. Read stories (hide_read) are left out
+        before grouping, so the best unread story of a topic leads it.
+        The section counts cover all sections, each as the front page of
+        that section would count it.
+        """
+        ranked = self._ranked(max_age_hours, min_sources, earlier_max, exclude_patterns)
+        shown = [s for s in ranked if not hide_read or s['unread_count']]
+        counts = Counter()
+        for name in {s['section'] for s in shown if s['section']}:
+            counts[name] = min(len(group_topics([s for s in shown if s['section'] == name])),
+                               limit)
+        groups = group_topics([s for s in shown
+                               if section is None or s['section'] == section])[:limit]
+        return FrontPage(
+            stories=groups[offset:offset + page_size],
+            total=len(groups),
+            sections=sorted(counts.items(), key=lambda item: (-item[1], item[0])),
+            hidden_read=len(ranked) - len(shown),
+        )
+
+    def related_stories(self, story: dict, max_age_hours: int, min_sources: int = 1,
+                        earlier_max: int = EARLIER_ARTICLES_MAX,
+                        exclude_patterns: Iterable[str] = ()) -> list:
+        """The other ranked stories of story's topic, best first."""
+        if story.get('topic_key') is None:
+            return []
+        return [s for s in self._ranked(max_age_hours, min_sources, earlier_max,
+                                        exclude_patterns)
+                if s['topic_key'] == story['topic_key'] and s['id'] != story['id']]
+
+    def search(self, query: str, max_age_hours: int, limit: int, min_sources: int = 1,
+               exclude_patterns: Iterable[str] = ()) -> list:
+        """
+        Stories with an article whose title or snippet contains query.
+
+        Covers every stored article (storage.retention_days), not only the
+        window: all of a story's articles count here, ranked like
+        top_stories. Case-insensitive, also for umlauts; % and _ match
+        themselves. Each story lists the matching articles in 'matches'
+        and is 'current' while it has an article in the window, which
+        articles mark with 'in_window'.
+        """
+        query = query.strip()[:MAX_QUERY_CHARS]
+        if not query:
+            return []
+        pattern = '%' + re.sub(r'([\\%_])', r'\\\1', query.casefold()) + '%'
+        now = datetime.now(timezone.utc)
+        cut = db_timestamp(now - timedelta(hours=max_age_hours))
+        with self._connect() as conn:
+            conn.create_function('arsse_fold', 1, _fold, deterministic=True)
+            conn.execute("BEGIN")
+            matched = defaultdict(set)
+            for row in conn.execute(
+                    r"""SELECT se.story_id, e.id FROM entries e
+                        JOIN story_entries se ON se.entry_id = e.id
+                        WHERE arsse_fold(e.title) LIKE :p ESCAPE '\'
+                           OR arsse_fold(e.snippet) LIKE :p ESCAPE '\'""",
+                    {'p': pattern}):
+                matched[row['story_id']].add(row['id'])
+            stories = []
+            for story_id, ids in matched.items():
+                row = conn.execute("SELECT * FROM stories WHERE id = ?", (story_id,)).fetchone()
+                if row is None:
+                    continue
+                story = self._load_story(conn, row, datetime.min.replace(tzinfo=timezone.utc),
+                                         0)
+                for article in story['articles']:
+                    article['in_window'] = (article['published_at'] or '') >= cut
+                story['matches'] = [a for a in story['articles'] if a['id'] in ids]
+                story['current'] = any(a['in_window'] for a in story['articles'])
+                stories.append(story)
+
+        stories = self._rank(stories, now, max_age_hours, min_sources, exclude_patterns)
+        return stories[:limit]
+
+    def _ranked(self, max_age_hours: int, min_sources: int, earlier_max: int,
+                exclude_patterns: Iterable[str]) -> list:
+        """All stories of the window that may be shown, best first (see top_stories)."""
         now = datetime.now(timezone.utc)
         since = now - timedelta(hours=max_age_hours)
         with self._connect() as conn:
@@ -436,7 +611,12 @@ class StoryStore:
                 "SELECT * FROM stories WHERE last_seen >= ?", (since.isoformat(),)
             ).fetchall()
             stories = [self._load_story(conn, row, since, earlier_max) for row in story_rows]
+        return self._rank(stories, now, max_age_hours, min_sources, exclude_patterns)
 
+    @staticmethod
+    def _rank(stories: list, now: datetime, max_age_hours: int, min_sources: int,
+              exclude_patterns: Iterable[str]) -> list:
+        """Drop stories that are not shown, score the others and sort them best first."""
         excluded = [re.compile(p, re.IGNORECASE) for p in exclude_patterns]
         stories = [s for s in stories
                    if s['articles'] and s['source_count'] >= min_sources
@@ -448,21 +628,22 @@ class StoryStore:
             story['score'] = story['source_count'] / (1 + max(age_hours, 0) / 12)
 
         stories.sort(key=lambda s: s['score'], reverse=True)
-        return stories[:limit]
+        return stories
 
     def top_stories_page(self, max_age_hours: int, limit: int, offset: int, page_size: int,
                          min_sources: int = 1, earlier_max: int = EARLIER_ARTICLES_MAX,
-                         exclude_patterns: Iterable[str] = ()) -> tuple:
+                         exclude_patterns: Iterable[str] = (), section: Optional[str] = None,
+                         hide_read: bool = False) -> tuple:
         """
-        Return (stories, total): one page of the ranked top_stories.
+        Return (stories, total): one page of the front page (see front_page).
 
-        total counts all stories up to limit, so the pages cover exactly
-        what top_stories returns; stories holds at most page_size of them,
-        starting at offset.
+        total counts all topic groups up to limit, so the pages cover
+        exactly what the front page lists; stories holds at most page_size
+        of them, starting at offset.
         """
-        stories = self.top_stories(max_age_hours, limit, min_sources, earlier_max,
-                                   exclude_patterns)
-        return stories[offset:offset + page_size], len(stories)
+        page = self.front_page(max_age_hours, limit, offset, page_size, min_sources,
+                               earlier_max, exclude_patterns, section, hide_read)
+        return page.stories, page.total
 
     def get_story(self, story_id: str, max_age_hours: int,
                   earlier_max: int = EARLIER_ARTICLES_MAX) -> Optional[dict]:
@@ -490,8 +671,10 @@ class StoryStore:
         still exist in Miniflux (see _prune_deleted).
         """
         all_articles = [dict(a) for a in conn.execute(
-            """SELECT e.*, se.is_duplicate FROM story_entries se
+            """SELECT e.*, se.is_duplicate, u.entry_id IS NOT NULL AS user_read
+               FROM story_entries se
                JOIN entries e ON e.id = se.entry_id
+               LEFT JOIN user_read u ON u.entry_id = e.id
                WHERE se.story_id = ?
                ORDER BY e.published_at DESC, e.id DESC""",
             (row['id'],),
@@ -504,6 +687,9 @@ class StoryStore:
         headline = next((a for a in articles if a['id'] == row['headline_entry_id']), None) \
             or next((a for a in articles if not a['is_duplicate']),
                     articles[0] if articles else None)
+        unread = sum(1 for a in articles if a['status'] == 'unread')
+        # Majority of the articles' sections; a tie goes to the newest article
+        sections = Counter(a['section'] for a in articles if a['section'])
         return {
             'id': row['id'],
             'first_seen': row['first_seen'],
@@ -515,7 +701,31 @@ class StoryStore:
             'earlier_articles': earlier[:max(earlier_max, 0)],
             'earlier_count': len(earlier),
             'duplicate_count': sum(1 for a in articles if a['is_duplicate']),
+            'unread_count': unread,
+            # Unread articles of a story the user marked read ('N neu')
+            'new_count': unread if any(a['user_read'] for a in articles) else 0,
+            'section': sections.most_common(1)[0][0] if sections else None,
+            'topic_key': row['topic_key'],
         }
+
+
+def group_topics(stories: list) -> list:
+    """
+    Keep the first (best-ranked) story of every topic, in order.
+
+    Returns copies of these stories with the other stories of their topic
+    in 'related', in order; the input is left alone. A story without
+    topic_key is a topic of its own.
+    """
+    leads = {}
+    for story in stories:
+        key = ('topic', story['topic_key']) if story.get('topic_key') is not None \
+            else ('story', story['id'])
+        if key in leads:
+            leads[key]['related'].append(story)
+        else:
+            leads[key] = dict(story, related=[])
+    return list(leads.values())
 
 
 def select_coverage(story: dict, n: int) -> list:
@@ -567,7 +777,14 @@ def _entry_row(entry: dict, fetched_at: datetime) -> dict:
         'created_at': db_timestamp(created) if created else None,
         'snippet': entry.get('_snippet', ''),
         'status': entry.get('status', 'unread'),
+        'section': entry.get('_section'),
+        'fetched_at': db_timestamp(fetched_at),
     }
+
+
+def _fold(value) -> str:
+    """Case-fold for search: SQLite's LIKE only ignores the case of ASCII letters."""
+    return value.casefold() if isinstance(value, str) else ''
 
 
 def _feed_key(article) -> object:

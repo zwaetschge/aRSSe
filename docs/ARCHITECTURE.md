@@ -117,6 +117,22 @@ fast den ganzen Vektor ausmacht. Eine Story aus genau zwei Artikeln braucht desh
 zusätzlich `clustering.min_pair_similarity` (Standard 0.30). Größere Stories sind davon nicht
 betroffen.
 
+**Themen:** Ein Ereignis zerfällt oft in mehrere Stories, weil die Berichte verschiedene
+Seiten beleuchten (Klopps Debüt, seine Aufstellung, der gegnerische Trainer). Ein zweiter
+Average-Linkage-Durchgang über dieselbe Distanzmatrix mit der großzügigeren
+`clustering.topic_threshold` (Standard 0.9, `CLUSTERING_TOPIC_THRESHOLD`, muss über
+`threshold` liegen, 0 = aus) ordnet jede Story einem Thema zu (das Thema der meisten ihrer
+Artikel). `topic_key` ist die kleinste Artikel-ID unter den Stories des Themas. Die Stories
+selbst bleiben unverändert – anders als der verworfene Durchgang, der Stories
+zusammenlegte (unten); das Thema steuert nur die Anzeige: Die Startseite zeigt je Thema die
+bestplatzierte Story und darunter die übrigen als „Mehr zum Thema“. Am Referenzsatz (letzter
+Lauf, 63 angezeigte Stories) fasst 0.9 34 Stories zu 15 Themen zusammen, 13 davon passend
+(Klopp-Debüt mit Aufstellung und Xavi, Pressezugang zum Weißen Haus, Olympia-Bewerbung,
+Konjunkturprognose …), 2 nicht (ein Hamburger Kriminalfall mit einem Fußballer-Rücktritt,
+zwei Ermittlungen ohne Bezug); die Startseite hat 44 statt 63 Plätze. 0.85 fasst nur 17
+Stories zu 8 Themen zusammen, 0.95 schon 41 zu 13. Der zweite Durchgang kostet so viel wie
+der erste (0.4 s für beide bei 519 Artikeln).
+
 **Erste Kalibrierung** (Stichprobe von Hand, damals mit Wortpaaren) an 519 Artikeln aus
 13 deutschen Feeds (24 h, RSS-Kurztexte):
 
@@ -279,11 +295,12 @@ SQLite-Datenbank im Datenverzeichnis des Containers:
 
 | Tabelle | Inhalt |
 |---------|--------|
-| `entries` | Kopie der Artikel-Metadaten (Titel, Feed, URL, Snippet) |
-| `stories` | Story-ID, Schlagzeilen-Artikel, erstmals/zuletzt gesehen |
+| `entries` | Kopie der Artikel-Metadaten (Titel, Feed, URL, Snippet, Status, Rubrik) |
+| `stories` | Story-ID, Schlagzeilen-Artikel, erstmals/zuletzt gesehen, Thema (`topic_key`) |
 | `story_entries` | Zuordnung Artikel → Story, Duplikat-Flag |
-| `meta` | Zeitpunkt und Statistik des letzten Laufs |
+| `meta` | Zeitpunkt und Statistik des letzten Laufs, Zeitpunkt seines Abrufs |
 | `auto_marked` | Von aRSSe als gelesen markierte Duplikate (werden nie erneut markiert) |
+| `user_read` | Vom Nutzer mit „Story gelesen“ markierte Artikel |
 
 **Abruf:** Die Artikel des Zeitfensters kommen seitenweise nach Artikel-ID absteigend
 (`order=id`, ab der zweiten Seite `before_entry_id` = kleinste ID der Vorseite). Seiten
@@ -293,6 +310,39 @@ ein doppelter Artikel ließ jeden Lauf scheitern. Neue Artikel bekommen immer h�
 und verschieben keine Seite. Greift `max_entries`, bleiben die zuletzt gespeicherten Artikel.
 Liefert eine Seite nur bereits bekannte IDs, ignoriert der Server `before_entry_id`; dann
 bleibt es bei der ersten Seite, und der Abruf gilt (wie bei `max_entries`) als unvollständig.
+Mit `globally_visible=true` (`miniflux.respect_hide_globally`, Standard an) liefert Miniflux
+keine Artikel aus Feeds oder Kategorien, die der Nutzer aus den globalen Listen ausgeblendet
+hat; gespeicherte Artikel daraus entfernt der nächste Lauf wie gelöschte.
+
+**Rubriken:** `entries.section` ist der Titel der Miniflux-Kategorie des Feeds
+(`feed.category.title`), außer der Standardkategorie „All“/„Alle“, die nichts aussagt. Sonst
+entscheidet der URL-Pfad ohne den letzten Abschnitt (der benennt den Artikel):
+`web.path_sections` ordnet reguläre Ausdrücke für einen ganzen Abschnitt Rubriken zu, das
+erste passende Muster gewinnt (Regional und Sport vor dem breiten Politik, damit
+`tagesschau.de/inland/regional/bayern/…` Regional ist). Fehlen Kategorie und passender Pfad,
+hat der Artikel keine Rubrik. Die Rubrik einer Story ist die ihrer meisten Artikel im
+Zeitfenster, bei Gleichstand die des neuesten. Am Referenzsatz (alle Feeds in „All“) tragen
+so 49 der 63 Stories eine Rubrik; Heise und Golem (`/news/…`) bekommen ihre nur über eine
+Miniflux-Kategorie wie „Technik“.
+
+**Gelesen:** `entries.status` kommt aus Miniflux. Eine Story, deren Artikel im Zeitfenster
+alle gelesen sind, zeigt die Startseite nur mit `?alle=1`. „Story gelesen“ schickt die IDs
+ihrer ungelesenen Artikel im Fenster an Miniflux (`PUT /v1/entries`), setzt sie lokal auf
+gelesen und trägt sie in `user_read` ein – getrennt von `auto_marked`: Die dort
+verzeichneten Duplikate stellt die Kanonisierung hinten an, vom Nutzer Gelesenes nicht. Hat
+eine Story Artikel aus `user_read` und wieder ungelesene, sind diese „neu“ (Anzeige „N neu“).
+Ein Lauf, der vor dem Tippen abgerufen, aber danach gespeichert hat, überschreibt den Status
+nicht (`user_read.read_at` gegen den Abrufzeitpunkt).
+
+**Status-Abgleich:** Zwischen zwei Läufen (30 Minuten) fragt ein eigener Thread alle
+`scheduling.status_sync_minutes` (Standard 5, 0 = aus) nach Artikeln des Zeitfensters, die in
+Miniflux seit dem letzten Abgleich gelesen wurden (`status=read`, `changed_after`, seitenweise
+nach ID, höchstens `max_entries`), und setzt nur gespeicherte Artikel auf gelesen. Miniflux
+setzt `changed_at` bei jeder Statusänderung. Die Abfragen überlappen um 60 s (ganze
+Sekunden, Uhren zweier Container); nach einem Lauf beginnt der nächste Abgleich wieder bei
+dessen Abrufzeitpunkt (`meta.last_fetch_at`), weil der Lauf ältere Stände gespeichert haben
+kann. Vor dem ersten Lauf gibt es nichts abzugleichen. Fehler landen im Log, die Wartezeit
+verdoppelt sich bis zum Achtfachen; der Abgleich hält weder Clustering noch Weboberfläche auf.
 
 **Datumsangaben:** `entries.published_at` ist höchstens der Zeitpunkt, zu dem Miniflux den
 Artikel gespeichert hat (`created_at`), bzw. der des ersten Abrufs. Feeds mit falscher
@@ -409,10 +459,11 @@ aus dem aufgerufenen Host und `MINIFLUX_PORT` zusammen, da der Reader nie der Se
 
 Für E-Ink ausgelegt, wo eine Seite stundenlang stehen bleibt und jedes Scrollen einen
 Teil-Refresh mit Geisterbildern kostet:
-- *Seiten:* `web.page_size` Stories pro Seite (Standard 10, `?seite=N`), insgesamt höchstens
-  `web.max_stories` (Standard 100). `store.top_stories_page` liefert die Seite und die
-  Gesamtzahl aus derselben Rangliste; eine Seite außerhalb von 1…N (oder kein Zahlwert)
-  ergibt `404`. Seite 1 des Referenzsatzes ist rund 21 KB groß. Oben und unten führen
+- *Seiten:* `web.page_size` Plätze pro Seite (Standard 10, `?seite=N`), insgesamt höchstens
+  `web.max_stories` (Standard 100); jedes Thema belegt einen Platz. `store.front_page`
+  liefert die Seite und die Gesamtzahl aus derselben Rangliste; eine Seite außerhalb von 1…N
+  (oder kein Zahlwert) ergibt `404`. Seite 1 des Referenzsatzes ist mit den Knöpfen „Story
+  gelesen“ rund 24 KB groß. Oben und unten führen
   44 px hohe Links „← Zurück“/„Weiter →“ weiter, die Statuszeile lautet z. B.
   „Stand 18:32 · Seite 1 von 7 · 63 Stories“.
 - *Uhrzeiten:* nur absolut, weil relative Angaben („vor 5 Min.“) auf einem stehenden
@@ -447,6 +498,31 @@ Teil-Refresh mit Geisterbildern kostet:
   Neuladen nicht mehr (Stories sind aus dem Zeitfenster gefallen), leitet `?auto=1` auf
   die letzte vorhandene Seite bzw. von einer Story auf die Titelseite um statt auf eine
   404 ohne Neuladen; ohne `?auto=1` bleibt es bei 404.
+- *Themen:* Unter der bestplatzierten Story eines Themas stehen bis zu drei weitere als
+  „Mehr zum Thema: Schlagzeile (3 Quellen)“ (je ein 44-px-Link zur Story-Seite), bei mehr
+  verweist „Alle N Artikel · M verwandte“ auf die Story-Seite, die alle unter „Verwandte
+  Stories“ listet. `/api/stories` bleibt eine flache Liste mit `topic_key`.
+- *Rubriken:* Eine Zeile „Alle · Politik (16) · Panorama (8) · Sport (6) …“ (44-px-Links,
+  meiste zuerst, gezählt wie die Seite der Rubrik) führt zu `?rubrik=Name`; auch
+  `/api/stories?rubrik=` filtert. Eine leere Rubrik ist eine leere Seite, keine 404.
+- *Gelesen:* Gelesene Stories fehlen (`?alle=1` zeigt sie mit „gelesen“, die Statuszeile
+  bietet „N gelesene zeigen“), und die bestplatzierte ungelesene Story führt ihr Thema an.
+  Jede Story mit ungelesenen Artikeln hat einen Knopf „Story gelesen (N)“: ein Formular
+  ohne JavaScript (`POST /story/<id>/gelesen`, Feld `next` = aufrufende Seite, auf der
+  Startseite weggelassen). Die Antwort ist `303` auf `next`, wenn es mit genau einem `/`
+  beginnt und keine Steuerzeichen oder `\` enthält, sonst auf `/` – nie auf eine fremde Seite.
+  Gibt es die Seite danach nicht mehr (die einzige Story der letzten Seite ist gelesen), geht
+  es auf die neue letzte Seite statt auf eine 404.
+  Ohne `MINIFLUX_API_KEY` fehlt der Knopf (`503`); ist Miniflux nicht erreichbar, bleibt alles
+  ungelesen (`502`). Eine wieder erscheinende Story trägt „N neu“.
+- *Suche:* Das Suchfeld im Kopf führt zu `/suche?q=…` (2 bis 100 Zeichen, sonst nur das
+  Formular): `LIKE` über Titel und Anriss aller gespeicherten Artikel (Aufbewahrung, nicht
+  nur Zeitfenster), `%` und `_` als Zeichen, Groß-/Kleinschreibung auch bei Umlauten egal
+  (`casefold` als SQL-Funktion). Treffer werden zu Stories zusammengefasst, wie die
+  Startseite gerankt (über alle Artikel der Story) und seitenweise gezeigt, je Story die
+  passenden Artikel. Artikel außerhalb des Zeitfensters verlinken auf das Original, und nur
+  Stories mit Artikeln im Fenster haben „Zur Story“. Darunter: „In Miniflux suchen“
+  (`BASE_URL/search?q=…`, Volltext über alles).
 - *Startbildschirm:* `intelligence/static/` enthält `manifest.webmanifest` (`start_url` `/`,
   `display: standalone`), PNG-Icons in 192 und 512 px, ein SVG-Icon und `favicon.ico`
   (auch unter `/favicon.ico`). Die Icons erzeugt `scripts/make-icons.py` nur mit der
@@ -473,7 +549,9 @@ Hook prüft jede Anfrage in dieser Reihenfolge:
 3. *CSRF:* Für alles außer GET/HEAD/OPTIONS muss `Sec-Fetch-Site` `same-origin` oder
    `none` sein; ältere Browser ohne diesen Header müssen `Origin` bzw. `Referer` mit dem
    aufgerufenen Host senden (`require_same_origin`). Basic Auth allein schützt nicht, weil
-   Browser gemerkte Zugangsdaten auch an fremde Formulare anhängen.
+   Browser gemerkte Zugangsdaten auch an fremde Formulare anhängen. „Story gelesen“, die
+   einzige Route, die etwas verändert (in Miniflux), prüft das zusätzlich selbst; mit
+   `web.auth.mode: none` ist es ihr einziger Schutz.
 
 Jede Antwort trägt `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline';
 …; frame-ancestors 'none'` (die Seiten haben kein JavaScript, nur einen `<style>`-Block),

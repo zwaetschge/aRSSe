@@ -191,10 +191,13 @@ def test_first_page_of_a_busy_day_stays_small(config, store):
         clusters.append(ClusterResult(ids, ids[0], set()))
     store.save_run(entries, clusters)
     config.miniflux_public_url = 'https://miniflux.example.com'
-    html = create_app(config, store).test_client().get('/').get_data()
+    # With a Miniflux client every story gets its 'Story gelesen' button
+    html = create_app(config, store, FakeClient([])).test_client().get('/').get_data()
     assert len(stories_on(html.decode())) == 10
     assert len(re.findall(r'<time [^>]*>[A-Z][a-z] \d\d:\d\d</time>', html.decode())) == 70
-    assert len(html) < 25_000, len(html)
+    assert html.decode().count('>Story gelesen (8)</button>') == 10
+    # 25 KB before search, sections and the read buttons (about 1.7 KB)
+    assert len(html) < 27_000, len(html)
 
 
 # --- Times --------------------------------------------------------------------

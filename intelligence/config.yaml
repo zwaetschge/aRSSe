@@ -17,6 +17,9 @@ miniflux:
   # localhost, bauen die Top Stories ihre Links aus der aufgerufenen Adresse
   # und diesem Port – localhost wäre auf dem E-Ink-Reader das Gerät selbst.
   public_port: 8080
+  # Feeds und Kategorien, die in Miniflux „In globalen Listen ausblenden“
+  # tragen, erscheinen auch in den Top Stories nicht (false = trotzdem zeigen)
+  respect_hide_globally: true
 
 # Clustering-Konfiguration (Average Linkage)
 clustering:
@@ -35,6 +38,15 @@ clustering:
   # 5 echte. 0 = aus.
   # Umgebungsvariable: CLUSTERING_MIN_PAIR_SIMILARITY
   min_pair_similarity: 0.30
+
+  # Themen: Stories zum selben Ereignis aus verschiedenen Blickwinkeln (das
+  # Spiel, der Trainer, die Reaktionen) belegen auf der Startseite nur einen
+  # Platz; die übrigen stehen darunter als „Mehr zum Thema“. Maximale
+  # durchschnittliche Distanz eines Themas, größer als threshold; die Grenzen
+  # der Stories selbst ändern sich nicht. Am Referenzsatz fasst 0.9 34 der
+  # 63 Stories zu 15 Themen zusammen (2 davon unpassend), 0.85 17 zu 8.
+  # 0 = aus. Umgebungsvariable: CLUSTERING_TOPIC_THRESHOLD
+  topic_threshold: 0.9
 
   # Längste Wortfolge im Vokabular: 1 = einzelne Wörter. Wortpaare (2)
   # machten Precision und Recall am Referenzsatz schlechter.
@@ -130,6 +142,11 @@ scheduling:
   # Zeitfenster für Artikel-Analyse (Stunden, mindestens 1)
   lookback_hours: 24
 
+  # Alle so viele Minuten fragt der Dienst Miniflux nach Artikeln, die dort
+  # seit dem letzten Mal gelesen wurden (eine kleine Anfrage), damit gelesene
+  # Stories nicht erst beim nächsten Clustering-Lauf verschwinden. 0 = aus
+  status_sync_minutes: 5
+
 # Lokale Story-Datenbank (SQLite)
 storage:
   db_path: "/app/data/arsse.db"
@@ -168,6 +185,19 @@ web:
   # Zeitzone der angezeigten Uhrzeiten, z.B. "Europe/Vienna".
   # Leer = TZ aus .env (Standard Europe/Berlin)
   timezone: ""
+  # Rubriken (?rubrik=Sport): Die Kategorie des Feeds in Miniflux, außer der
+  # Standardkategorie „All“. Für Feeds dort entscheidet der Pfad der
+  # Artikel-URL: das erste Muster (in dieser Reihenfolge), das einen ganzen
+  # Abschnitt trifft, z.B. „sport“ in tagesschau.de/sport/fussball/…
+  # Reguläre Ausdrücke, Groß-/Kleinschreibung egal. {} = nur Kategorien
+  path_sections:
+    'regional(es)?|baden-wuerttemberg|bayern|berlin(-brandenburg)?|brandenburg|bremen|hamburg(-schleswig-holstein)?|hessen|mecklenburg-vorpommern|niedersachsen|nordrhein-westfalen|nrw|rheinland-pfalz|saarland|sachsen|sachsen-anhalt|schleswig-holstein|th(ue|ü)ringen': Regional
+    'sport|fussball\w*': Sport
+    'wissen|technik|digital|netzwelt': Technik
+    'wirtschaft|finanzen': Wirtschaft
+    'kultur|feuilleton': Kultur
+    'panorama|gesellschaft': Panorama
+    'politik|inland|ausland': Politik
 
   # Zugriffsschutz (README, Abschnitt "Absicherung"). /healthz und /static/
   # (Manifest und Icons für den Startbildschirm) bleiben offen.

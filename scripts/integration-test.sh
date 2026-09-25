@@ -183,6 +183,29 @@ for FILE in static/icon-192.png static/icon-512.png static/icon.svg favicon.ico;
     [ "$CODE" = 200 ] || { echo "Expected 200 for /$FILE, got $CODE"; exit 1; }
 done
 
+step "Marking a story read ('Story gelesen')"
+CHIP=$(echo "$STORIES" | python3 -c '
+import json, sys
+print(next(s["id"] for s in json.load(sys.stdin) if "Prozessor" in s["headline"]["title"]))
+')
+STORY_URL="http://localhost:$IT_PORT/story/$CHIP/gelesen"
+CODE=$(http_code -d '' -H 'Sec-Fetch-Site: cross-site' "$STORY_URL")
+[ "$CODE" = 403 ] || { echo "Expected 403 for a cross-site POST, got $CODE"; exit 1; }
+RESULT=$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' -d 'next=//evil.example' \
+    -H 'Sec-Fetch-Site: same-origin' "$STORY_URL")
+echo "    POST $STORY_URL: $RESULT"
+[ "$RESULT" = "303 http://localhost:$IT_PORT/" ] \
+    || { echo "Expected 303 to / (never to another site), got $RESULT"; exit 1; }
+READ=$(curl -fsS -H "X-Auth-Token: $API_KEY" "$API/entries?status=read" | json 'd["total"]')
+[ "$READ" -eq 3 ] || { echo "Expected the duplicate and both chip articles read, got $READ"; exit 1; }
+curl -fsS "http://localhost:$IT_PORT/api/stories" | python3 -c '
+import json, sys
+titles = [s["headline"]["title"] for s in json.load(sys.stdin)]
+assert not any("Prozessor" in t for t in titles), f"read story still listed: {titles}"
+'
+curl -fsS "http://localhost:$IT_PORT/api/stories?alle=1" | grep -q "Prozessor" \
+    || { echo "The read story is missing from ?alle=1"; exit 1; }
+
 step "Protecting Top Stories with a password (WEB_AUTH_MODE=basic)"
 cat >> "$WORK/.env" <<ENV
 WEB_AUTH_MODE=basic

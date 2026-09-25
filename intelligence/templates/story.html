@@ -13,8 +13,13 @@
     {{ story.source_count }} Quellen, {{ story.article_count }} Artikel
     · Erste Meldung {{ first.published_at | clock }} ({{ first.feed_title }})
     {%- if last.id != first.id %} · zuletzt {{ last.published_at | clock }} ({{ last.feed_title }}){% endif %}
+    {%- if story.new_count %} · <span class="new">{{ story.new_count }} neu</span>{% elif not story.unread_count %} · gelesen{% endif %}
   </div>
   {% if story.headline.snippet %}<p class="snippet">{{ story.headline.snippet }}</p>{% endif %}
+  {% if can_mark_read and story.unread_count %}
+  {# next defaults to the front page, so it is left out there #}
+  <form method="post" action="/story/{{ story.id }}/gelesen">{% if here() != '/' %}<input type="hidden" name="next" value="{{ here() }}">{% endif %}<button>Story gelesen ({{ story.unread_count }})</button></form>
+  {% endif %}
 
   <nav class="views" aria-label="Ansicht">
     {% if chronological %}<a href="{{ nav('/story/' ~ story.id) }}">Nach Aktualität</a><span aria-current="page">Chronologisch</span>
@@ -61,6 +66,15 @@
   {% if story.earlier_count > story.earlier_articles | length %}
   <p class="meta">und {{ story.earlier_count - story.earlier_articles | length }} ältere</p>
   {% endif %}
+  {% endif %}
+
+  {% if related %}
+  <h3>Verwandte Stories</h3>
+  <ul class="coverage">
+    {% for r in related %}
+    <li><a href="{{ nav('/story/' ~ r.id) }}">{{ display_title(r.headline) }} <span class="meta">{{ r.source_count }} Quellen · {{ r.articles[0].published_at | clock }}</span></a></li>
+    {% endfor %}
+  </ul>
   {% endif %}
 </article>
 <a class="more" href="{{ nav('/') }}"><span aria-hidden="true">←</span> Zurück zu Top Stories</a>

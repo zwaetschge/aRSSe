@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import store as store_module
-from conftest import make_entry, sample_entries
+from conftest import downgrade_to_v2, make_entry, sample_entries
 from store import (MIGRATIONS, REBUILD, SCHEMA_V1, ClusterResult, FetchResult,
                    StoreTooNewError, StoryStore, db_timestamp)
 from web import create_app
@@ -253,7 +253,8 @@ def test_top_stories_read_one_snapshot(store, monkeypatch):
 
 def test_story_without_articles_is_not_found(config, store):
     conn = sqlite3.connect(config.storage.db_path)
-    conn.execute("INSERT INTO stories VALUES ('empty', 1, '2026-01-01', '2026-01-01')")
+    conn.execute("INSERT INTO stories (id, headline_entry_id, first_seen, last_seen) "
+                 "VALUES ('empty', 1, '2026-01-01', '2026-01-01')")
     conn.commit()
     conn.close()
 
@@ -322,18 +323,18 @@ def test_v2_database_gets_auto_marked_table(tmp_path, monkeypatch):
     assert st.auto_marked_ids() == {1}
 
 
-def test_v2_database_seeds_auto_marked_with_read_duplicates(tmp_path, monkeypatch):
+def test_v2_database_seeds_auto_marked_with_read_duplicates(tmp_path):
     # Earlier versions marked every unread duplicate read in each run and
     # stored it as read
     path = str(tmp_path / 'arsse.db')
-    monkeypatch.setattr(store_module, 'MIGRATIONS', MIGRATIONS[:2])
-    old = StoryStore(path)
     entries = sample_entries()
     for e in entries:
         if e['id'] in (2, 3, 5):
             e['status'] = 'read'
-    old.save_run(entries, [ClusterResult([1, 2, 3], 1, {2}), ClusterResult([4, 5], 4, set())])
-    monkeypatch.undo()
+    StoryStore(path).save_run(entries, [ClusterResult([1, 2, 3], 1, {2}),
+                                        ClusterResult([4, 5], 4, set())])
+    downgrade_to_v2(path)
+    assert user_version(path) == 2
 
     st = StoryStore(path)
     rows = marked_rows(path)
