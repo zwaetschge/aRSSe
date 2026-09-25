@@ -110,7 +110,10 @@ Links führen in Miniflux (`BASE_URL`), damit Gelesen-Status und Volltext erhalt
 # intelligence/config.yaml
 clustering:
   threshold: 0.75                # max. durchschnittliche Kosinus-Distanz einer Story
+  min_pair_similarity: 0.30      # Mindest-Ähnlichkeit einer Story aus nur zwei Artikeln
   stemming: true
+  # noise_title_patterns: Liste von Titelmustern (Werbung, Podcasts, Liveblogs …),
+  # die keine Schlagzeile werden, solange die Story andere Artikel hat
 
 deduplication:
   threshold: 0.85                # Duplikat-Schwellenwert (Text ohne Titel)
@@ -120,6 +123,9 @@ deduplication:
 
 scheduling:
   interval_minutes: 30           # Ausführungsintervall
+
+web:
+  exclude_patterns: ['^Wetter\b']  # Stories nur aus solchen Titeln nicht anzeigen
 ```
 
 Umgebungsvariablen aus `.env` (z.B. `CLUSTERING_THRESHOLD`) überschreiben `config.yaml`; auskommentierte bzw. leere Variablen tun das nicht.
@@ -130,7 +136,11 @@ Umgebungsvariablen aus `.env` (z.B. `CLUSTERING_THRESHOLD`) überschreiben `conf
 docker compose exec intelligence python evaluate.py 0.65 0.7 0.75 0.8
 ```
 
-Es zeigt je Schwelle die Anzahl der Stories sowie die größten und einige zufällige Stories. Große Stories mit gemischten Themen = Schwelle zu hoch; viele zusammengehörige Artikel außerhalb von Stories = zu niedrig.
+Es zeigt je Schwelle die Anzahl der Stories sowie die größten und einige zufällige Stories. Große Stories mit gemischten Themen = Schwelle zu hoch; viele zusammengehörige Artikel außerhalb von Stories = zu niedrig. Viele zufällige Paare aus zwei Artikeln: `min_pair_similarity` erhöhen (0.35 ist strenger).
+
+Wer genauer messen will: `eval/export_corpus.py` speichert die Artikel des Zeitfensters, und `evaluate.py --corpus … --gold …` bewertet das Clustering gegen handmarkierte Paare (Precision/Recall, unsinnige Stories, Stabilität über mehrere Läufe). Die Messwerte am Referenzsatz und die Anleitung stehen in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) („Messungen am Referenzsatz“).
+
+**Werbung und Rauschen:** Titel wie „Anzeige: …“, „(g+) …“, Podcasts oder Liveblogs werden nur dann Schlagzeile einer Story, wenn sie keinen anderen Artikel hat (`noise_title_patterns`), und der Wetterbericht erscheint nicht als Story (`web.exclude_patterns`). Werbung lässt sich zusätzlich schon in Miniflux verwerfen: *Einstellungen > Eintrags-Sperrregeln* mit `EntryTitle=(?i)^(Anzeige|heise-Angebot):` – dann fehlen diese Einträge aber auch in Miniflux selbst.
 
 **Lokale Feeds:** Miniflux ruft seit 2.3 standardmäßig keine Feeds aus privaten Netzen ab. Für Feeds im Heimnetz `FETCHER_ALLOW_PRIVATE_NETWORKS=1` beim Miniflux-Container setzen.
 
@@ -157,7 +167,8 @@ aRSSe/
 │   ├── requirements.txt    # Python-Abhängigkeiten
 │   ├── entrypoint.py       # Container-Start: Datenrechte setzen, Root-Rechte abgeben
 │   ├── news_clustering.py  # Clustering-Logik und Einstiegspunkt
-│   ├── evaluate.py         # Clustering-Schwelle an eigenen Feeds kalibrieren
+│   ├── evaluate.py         # Clustering-Schwelle an eigenen Feeds kalibrieren und messen
+│   ├── eval/               # Mess-Werkzeuge: Korpus-Export, Metriken, Wiederholung, gold.json
 │   ├── store.py            # SQLite-Story-Datenbank
 │   ├── web.py              # Top-Stories-Oberfläche
 │   ├── templates/          # HTML-Templates
@@ -337,7 +348,7 @@ WEB_ALLOWED_HOSTS=stories.example.com
 1. Prüfen Sie den Status: `curl http://<unraid-ip>:8081/healthz` (enthält die Statistik des letzten Laufs)
 2. Prüfen Sie die Logs: `docker logs arsse-intelligence`
 3. Stories entstehen erst, wenn mehrere Feeds über dasselbe Thema berichten – abonnieren Sie mehrere überlappende Quellen
-4. Zu wenige oder zu große Stories: `threshold` mit `evaluate.py` kalibrieren (höher = größere, aber unschärfere Stories)
+4. Zu wenige oder zu große Stories: `threshold` mit `evaluate.py` kalibrieren (höher = größere, aber unschärfere Stories); zu viele zufällige Zweier-Stories: `min_pair_similarity` erhöhen
 5. `Cannot open story database`: Der Container konnte `${DATA_PATH}/intelligence` nicht an `PUID:PGID` übergeben (z.B. NFS-Freigabe mit `root_squash`, oder eine ältere `docker-compose.yml` mit `user:`) – dann `chown PUID:PGID` auf das Verzeichnis selbst ausführen
 6. Alle Links der Top Stories zeigen auf `localhost` oder die falsche Adresse: `BASE_URL` in `.env` setzen und `docker compose up -d` ausführen
 7. `Datenbank stammt von neuerer aRSSe-Version`: Das Image ist älter als die Datenbank (z.B. nach einem Rückschritt auf eine ältere Version). Entweder wieder die neuere Version starten, ein Backup von `arsse.db` aus der Zeit vor dem Update einspielen oder `${DATA_PATH}/intelligence/arsse.db*` löschen – die Datenbank ist nur ein Zwischenspeicher und wird beim nächsten Lauf aus Miniflux neu aufgebaut. Dabei ändern sich die Story-IDs, und aRSSe vergisst, welche Duplikate es schon als gelesen markiert hat: Duplikate im aktuellen Zeitfenster, die Sie wieder auf ungelesen gesetzt haben, werden einmal erneut als gelesen markiert

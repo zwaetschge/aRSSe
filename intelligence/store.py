@@ -15,13 +15,14 @@ The schema is versioned with ``PRAGMA user_version``; see MIGRATIONS.
 import json
 import logging
 import os
+import re
 import sqlite3
 import uuid
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Iterator, Optional
+from typing import Iterable, Iterator, Optional
 
 logger = logging.getLogger('arsse-intelligence')
 
@@ -154,6 +155,9 @@ class ClusterResult:
     # same or nearly the same text as a better-ranked copy that joined the
     # same group); a subset of duplicate_ids
     copy_ids: set = field(default_factory=set)
+    # Members unfit to head the story: no title, or a title matching
+    # clustering.noise_title_patterns (ads, podcasts, live blogs, ...)
+    noise_ids: set = field(default_factory=set)
 
 
 def _now() -> str:
@@ -263,6 +267,10 @@ class StoryStore:
             min_sources: Feeds a story needs to be shown (web.min_sources);
                 story IDs that were visible are kept in preference.
 
+        A story keeps its headline while that article is still a member,
+        not noise (cluster.noise_ids) and not a duplicate, even if the
+        cluster picked another one (see _sticky_headline).
+
         Returns:
             Mapping of cluster index to the story ID it was stored under.
         """
@@ -318,7 +326,7 @@ class StoryStore:
                        ON CONFLICT(id) DO UPDATE SET
                            headline_entry_id = excluded.headline_entry_id,
                            last_seen = excluded.last_seen""",
-                    (story_id, cluster.headline_entry_id, now, now),
+                    (story_id, _sticky_headline(cluster, previous.get(story_id)), now, now),
                 )
                 conn.executemany(
                     "INSERT INTO story_entries (entry_id, story_id, is_duplicate) "
@@ -400,7 +408,8 @@ class StoryStore:
         return json.loads(row['value']) if row else default
 
     def top_stories(self, max_age_hours: int, limit: int, min_sources: int = 1,
-                    earlier_max: int = EARLIER_ARTICLES_MAX) -> list:
+                    earlier_max: int = EARLIER_ARTICLES_MAX,
+                    exclude_patterns: Iterable[str] = ()) -> list:
         """
         Return ranked stories with their articles.
 
@@ -408,6 +417,9 @@ class StoryStore:
         min_sources feeds among them, and ranking favours stories covered
         by many distinct sources and decays with the age of the newest
         article. Older articles are listed in 'earlier_articles'.
+        Stories whose articles all have a title matching one of
+        exclude_patterns (regular expressions, case-insensitive; e.g. the
+        weather report) are left out.
         """
         now = datetime.now(timezone.utc)
         since = now - timedelta(hours=max_age_hours)
@@ -420,8 +432,11 @@ class StoryStore:
             ).fetchall()
             stories = [self._load_story(conn, row, since, earlier_max) for row in story_rows]
 
+        excluded = [re.compile(p, re.IGNORECASE) for p in exclude_patterns]
         stories = [s for s in stories
-                   if s['articles'] and s['source_count'] >= min_sources]
+                   if s['articles'] and s['source_count'] >= min_sources
+                   and not (excluded and all(_matches_any(a['title'], excluded)
+                                             for a in s['articles']))]
         for story in stories:
             newest = parse_date(story['articles'][0]['published_at'])
             age_hours = (now - newest).total_seconds() / 3600 if newest else max_age_hours
@@ -578,6 +593,28 @@ def _previous_stories(conn: sqlite3.Connection, min_sources: int) -> dict:
     for story in previous.values():
         story.visible = len(story.feeds) >= min_sources
     return dict(previous)
+
+
+def _sticky_headline(cluster: ClusterResult, story: Optional[_PreviousStory]) -> int:
+    """
+    The headline to store for cluster; story is the stored story it continues.
+
+    The previous headline stays while it is still a member that may head
+    the story (not in noise_ids) and is not a duplicate (those may be
+    marked read). A headline that changes with every longer article
+    forces a full redraw on E-Ink and makes the story look new.
+    """
+    old = story.headline_entry_id if story else None
+    if (old is not None and old != cluster.headline_entry_id
+            and old in cluster.entry_ids
+            and old not in cluster.noise_ids
+            and old not in cluster.duplicate_ids):
+        return old
+    return cluster.headline_entry_id
+
+
+def _matches_any(title: Optional[str], patterns: list) -> bool:
+    return any(pattern.search(title or '') for pattern in patterns)
 
 
 def _match_story_ids(clusters: list, previous: dict, feed_of: dict,

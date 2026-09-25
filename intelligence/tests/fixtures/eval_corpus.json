@@ -1,0 +1,170 @@
+[
+ {
+  "id": 1,
+  "feed_id": 1,
+  "status": "unread",
+  "feed": {
+   "id": 1,
+   "title": "Tagesschau",
+   "site_url": "https://www.tagesschau.de"
+  },
+  "title": "Bundestag beschließt Haushalt für 2027",
+  "content": "<p>Der Bundestag hat den Bundeshaushalt für das kommende Jahr beschlossen. Der Finanzminister verteidigt die Schuldenbremse, die Opposition kritisiert Kürzungen bei Bildung und Infrastruktur.</p>",
+  "url": "https://example.org/tagesschau/1",
+  "published_at": "2026-09-24T07:00:00Z"
+ },
+ {
+  "id": 2,
+  "feed_id": 3,
+  "status": "unread",
+  "feed": {
+   "id": 3,
+   "title": "Zeit",
+   "site_url": "https://www.zeit.de"
+  },
+  "title": "Haushalt: Bundestag stimmt nach langer Debatte zu",
+  "content": "<p>Nach langer Debatte stimmt der Bundestag dem Haushalt zu. Die Schuldenbremse bleibt, die Opposition kritisiert die Kürzungen bei Bildung und Infrastruktur. Der Bundesrat entscheidet im Dezember.</p>",
+  "url": "https://example.org/zeit/2",
+  "published_at": "2026-09-24T09:00:00Z"
+ },
+ {
+  "id": 3,
+  "feed_id": 2,
+  "status": "unread",
+  "feed": {
+   "id": 2,
+   "title": "Spiegel",
+   "site_url": "https://www.spiegel.de"
+  },
+  "title": "Chiphersteller stellt neuen Prozessor vor",
+  "content": "<p>Ein Chiphersteller hat einen neuen Prozessor mit höherer Rechenleistung vorgestellt. Er verspricht effizientere Grafikeinheiten und längere Akkulaufzeit für Notebooks.</p>",
+  "url": "https://example.org/spiegel/3",
+  "published_at": "2026-09-24T06:00:00Z"
+ },
+ {
+  "id": 4,
+  "feed_id": 4,
+  "status": "unread",
+  "feed": {
+   "id": 4,
+   "title": "Heise",
+   "site_url": "https://www.heise.de"
+  },
+  "title": "Neuer Prozessor soll Notebooks schneller machen",
+  "content": "<p>Der neue Prozessor soll Notebooks schneller machen. Erste Benchmarks zur Rechenleistung, zu den Grafikeinheiten und zur Akkulaufzeit folgen in wenigen Wochen.</p>",
+  "url": "https://example.org/heise/4",
+  "published_at": "2026-09-24T10:00:00Z"
+ },
+ {
+  "id": 5,
+  "feed_id": 1,
+  "status": "unread",
+  "feed": {
+   "id": 1,
+   "title": "Tagesschau",
+   "site_url": "https://www.tagesschau.de"
+  },
+  "title": "Hochwasser in Bayern: Pegel steigen weiter",
+  "content": "<p>Nach tagelangem Regen steigen in Bayern die Pegel der Donau weiter. Feuerwehr und Technisches Hilfswerk sichern Deiche, mehrere Orte wurden evakuiert.</p>",
+  "url": "https://example.org/tagesschau/5",
+  "published_at": "2026-09-24T08:00:00Z"
+ },
+ {
+  "id": 6,
+  "feed_id": 2,
+  "status": "unread",
+  "feed": {
+   "id": 2,
+   "title": "Spiegel",
+   "site_url": "https://www.spiegel.de"
+  },
+  "title": "Donau-Hochwasser: Evakuierungen in Bayern",
+  "content": "<p>Das Hochwasser an der Donau zwingt in Bayern zu Evakuierungen. Die Feuerwehr sichert Deiche, das Technische Hilfswerk pumpt Keller leer, der Regen soll anhalten.</p>",
+  "url": "https://example.org/spiegel/6",
+  "published_at": "2026-09-24T11:00:00Z"
+ },
+ {
+  "id": 7,
+  "feed_id": 3,
+  "status": "unread",
+  "feed": {
+   "id": 3,
+   "title": "Zeit",
+   "site_url": "https://www.zeit.de"
+  },
+  "title": "Bahnstreik legt Fernverkehr lahm",
+  "content": "<p>Die Lokführergewerkschaft hat zum Streik aufgerufen. Im Fernverkehr fallen die meisten Züge aus, Pendler müssen mit großen Einschränkungen rechnen.</p>",
+  "url": "https://example.org/zeit/7",
+  "published_at": "2026-09-24T05:00:00Z"
+ },
+ {
+  "id": 8,
+  "feed_id": 4,
+  "status": "unread",
+  "feed": {
+   "id": 4,
+   "title": "Heise",
+   "site_url": "https://www.heise.de"
+  },
+  "title": "Lokführer streiken: Kaum Züge im Fernverkehr",
+  "content": "<p>Der Streik der Lokführergewerkschaft trifft vor allem den Fernverkehr. Die meisten Züge fallen aus, auch Pendler im Regionalverkehr müssen mit Einschränkungen rechnen.</p>",
+  "url": "https://example.org/heise/8",
+  "published_at": "2026-09-24T11:30:00Z"
+ },
+ {
+  "id": 9,
+  "feed_id": 1,
+  "status": "unread",
+  "feed": {
+   "id": 1,
+   "title": "Tagesschau",
+   "site_url": "https://www.tagesschau.de"
+  },
+  "title": "Ermittler durchsuchen Wohnungen",
+  "content": "<p>Bei einer Razzia wegen Betrugs mit Fördergeld durchsuchten Ermittler Wohnungen an der Donau, Anwohner mussten Einschränkungen hinnehmen. Der Landrat kritisiert die Behörden. Betroffen war auch ein Verein für Bildung.</p>",
+  "url": "https://example.org/tagesschau/9",
+  "published_at": "2026-09-24T08:30:00Z"
+ },
+ {
+  "id": 10,
+  "feed_id": 4,
+  "status": "unread",
+  "feed": {
+   "id": 4,
+   "title": "Heise",
+   "site_url": "https://www.heise.de"
+  },
+  "title": "Zoll prüft Baustellen",
+  "content": "<p>Der Zoll hat bei einer Razzia Baustellen geprüft. Pendler wurden befragt, Notebooks sichergestellt.</p>",
+  "url": "https://example.org/heise/10",
+  "published_at": "2026-09-24T09:30:00Z"
+ },
+ {
+  "id": 11,
+  "feed_id": 2,
+  "status": "unread",
+  "feed": {
+   "id": 2,
+   "title": "Spiegel",
+   "site_url": "https://www.spiegel.de"
+  },
+  "title": "Oberbürgermeisterwahl in Leipzig ohne Sieger",
+  "content": "<p>Bei der Oberbürgermeisterwahl in Leipzig hat kein Kandidat die absolute Mehrheit erreicht. Die Stichwahl findet in drei Wochen statt, die Wahlbeteiligung lag bei 48 Prozent. Themen im Wahlkampf waren Bildung, Infrastruktur und der Fernverkehr.</p>",
+  "url": "https://example.org/spiegel/11",
+  "published_at": "2026-09-24T04:00:00Z"
+ },
+ {
+  "id": 12,
+  "feed_id": 3,
+  "status": "unread",
+  "feed": {
+   "id": 3,
+   "title": "Zeit",
+   "site_url": "https://www.zeit.de"
+  },
+  "title": "Amtsinhaber vorn, Entscheidung fällt später",
+  "content": "<p>In Leipzig entscheidet eine Stichwahl über das künftige Stadtoberhaupt. Der Amtsinhaber lag vorn, die Herausforderin der Grünen kam auf Platz zwei. Sie will Notebooks für alle Schulen und höhere Deiche am Fluss.</p>",
+  "url": "https://example.org/zeit/12",
+  "published_at": "2026-09-24T10:30:00Z"
+ }
+]

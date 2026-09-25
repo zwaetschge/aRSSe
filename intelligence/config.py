@@ -35,6 +35,28 @@ _LEGACY_CLUSTERING_KEYS = ('eps', 'min_samples', 'metric')
 MAX_BATCH_SIZE = 1000
 # Average linkage needs time and memory quadratic in the number of articles
 MAX_ENTRIES_LIMIT = 5000
+# Longer word n-grams only add rare features (and cost time); measured on
+# the reference corpus, even bigrams lower precision and recall
+MAX_NGRAM = 3
+
+# Titles of items that should not head a story: ads, paywall teasers,
+# podcasts, live blogs, videos, weather and daily roundups. Matched
+# case-insensitively anywhere in the title (use ^ to anchor).
+DEFAULT_NOISE_TITLE_PATTERNS = [
+    r'^(Anzeige|heise-Angebot):',
+    r'^\((g|S)\+\)',
+    r'heise\+',
+    r'SPIEGEL\+',
+    r'\bF\+',
+    r'SZ Plus',
+    r'Podcasts?\b',
+    r'Live-?blog|Live-?ticker|Newsblog',
+    r'^Video:',
+    r'^Wetter\b',
+    r'News des Tages',
+    r'^Was jetzt\?',
+    r'Briefing',
+]
 
 
 class ConfigError(ValueError):
@@ -49,6 +71,16 @@ class ClusteringConfig:
     max_features: int = 5000
     language: str = "german"
     stemming: bool = True
+    # Longest word n-gram in the TF-IDF vocabulary (1 = single words)
+    ngram_max: int = 1
+    # Minimum cosine similarity of a story of only two articles. Average
+    # linkage accepts any pair above 1 - threshold (0.25), which one shared
+    # rare word reaches; 0 disables the check.
+    min_pair_similarity: float = 0.30
+    # Regular expressions (case-insensitive) for titles that never head a
+    # story while another article can (see DEFAULT_NOISE_TITLE_PATTERNS)
+    noise_title_patterns: list = field(
+        default_factory=lambda: list(DEFAULT_NOISE_TITLE_PATTERNS))
 
 
 @dataclass
@@ -111,6 +143,9 @@ class WebConfig:
     min_sources: int = 2
     # Articles older than the lookback window listed on a story page
     earlier_articles_max: int = 20
+    # Stories whose articles (inside the window) all have a title matching
+    # one of these regular expressions (case-insensitive) are not listed
+    exclude_patterns: list = field(default_factory=lambda: [r'^Wetter\b'])
     # Host names the interface answers to (DNS rebinding protection);
     # empty = any. localhost and loopback addresses are always allowed.
     allowed_hosts: list = field(default_factory=list)
@@ -259,6 +294,11 @@ def _apply_env_config(config: Config) -> None:
     # Clustering
     if threshold := _env('CLUSTERING_THRESHOLD'):
         config.clustering.threshold = _env_number('CLUSTERING_THRESHOLD', threshold, float)
+    if ngram_max := _env('CLUSTERING_NGRAM_MAX'):
+        config.clustering.ngram_max = _env_number('CLUSTERING_NGRAM_MAX', ngram_max, int)
+    if similarity := _env('CLUSTERING_MIN_PAIR_SIMILARITY'):
+        config.clustering.min_pair_similarity = _env_number(
+            'CLUSTERING_MIN_PAIR_SIMILARITY', similarity, float)
     for obsolete in ('CLUSTERING_EPS', 'CLUSTERING_MIN_SAMPLES'):
         if _env(obsolete):
             logger.warning("%s is obsolete and ignored; use CLUSTERING_THRESHOLD", obsolete)
@@ -330,6 +370,8 @@ def _env_number(name: str, value: str, cast):
 _NUMERIC_FIELDS = (
     ('clustering.threshold', ('clustering', 'threshold'), False),
     ('clustering.max_features', ('clustering', 'max_features'), True),
+    ('clustering.ngram_max', ('clustering', 'ngram_max'), True),
+    ('clustering.min_pair_similarity', ('clustering', 'min_pair_similarity'), False),
     ('deduplication.threshold', ('deduplication', 'threshold'), False),
     ('deduplication.min_body_tokens', ('deduplication', 'min_body_tokens'), True),
     ('scheduling.interval_minutes', ('scheduling', 'interval_minutes'), True),
@@ -371,6 +413,29 @@ def _string_list(name: str, value) -> list:
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return [item.strip() for item in value if item.strip()]
     raise ConfigError(f"{name} must be a list of strings, got {value!r}")
+
+
+def _pattern_list(name: str, value) -> list:
+    """
+    Check a list of regular expressions; a single string is one pattern.
+
+    Unlike _string_list, a string is not split at commas: they are part
+    of regular expressions ('{1,3}').
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ConfigError(f"{name} must be a list of regular expressions, got {value!r}")
+    patterns = [item for item in value if item.strip()]
+    for pattern in patterns:
+        try:
+            re.compile(pattern, re.IGNORECASE)
+        except re.error as e:
+            raise ConfigError(f"{name}: '{pattern}' is not a valid regular expression "
+                              f"({e})") from None
+    return patterns
 
 
 def _host_name(name: str, value: str) -> str:
@@ -492,6 +557,15 @@ def _validate(config: Config) -> None:
         raise ConfigError("clustering.threshold must be in (0, 1)")
     if config.clustering.max_features is not None and config.clustering.max_features < 1:
         raise ConfigError("clustering.max_features must be at least 1")
+    if not 1 <= config.clustering.ngram_max <= MAX_NGRAM:
+        raise ConfigError(f"clustering.ngram_max must be between 1 and {MAX_NGRAM}, "
+                          f"got {config.clustering.ngram_max}")
+    if not 0.0 <= config.clustering.min_pair_similarity < 1.0:
+        raise ConfigError("clustering.min_pair_similarity must be in [0, 1)")
+    config.clustering.noise_title_patterns = _pattern_list(
+        'clustering.noise_title_patterns', config.clustering.noise_title_patterns)
+    config.web.exclude_patterns = _pattern_list('web.exclude_patterns',
+                                                config.web.exclude_patterns)
     if not 0 < config.miniflux_public_port < 65536:
         raise ConfigError("miniflux.public_port must be a TCP port (1-65535)")
     if config.web.min_sources < 1:

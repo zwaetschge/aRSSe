@@ -80,11 +80,15 @@ Sie enthalten keinen Text, würden die 200 000 Zeichen aber allein füllen.
 TfidfVectorizer(
     max_features=5000,
     tokenizer=tokenize,   # NLTK-Stopwords + Snowball-Stemmer (deutsch)
-    ngram_range=(1, 2),
+    ngram_range=(1, clustering.ngram_max),   # Standard 1: nur einzelne Wörter
     min_df=2,
     sublinear_tf=True
 )
 ```
+Der Text ist der Titel (doppelt gewichtet) plus der Artikeltext ohne HTML. Einträge ohne
+Titel, deren Text mit „+++“ beginnt (Nachrichten-Ticker wie beim MDR), bleiben draußen: Sie
+streifen alle Themen des Tages und zogen im Referenzsatz fremde Artikel in die größte Story
+(ohne den einen Ticker steigt R von 0.641 auf 0.668).
 
 #### Agglomeratives Clustering (Average Linkage)
 ```python
@@ -100,7 +104,16 @@ Story *im Durchschnitt* allen ihren Artikeln nahe ist. Das vorher verwendete DBS
 dagegen Artikel über Ketten einzelner Nachbarn – ein gemeinsames Stichwort wie „Trump“
 reichte, um Gipfeltreffen und Pressestreit zu einer Story zu verschmelzen.
 
-**Kalibrierung** an 519 Artikeln aus 13 deutschen Feeds (24 h, RSS-Kurztexte):
+**Zwei-Artikel-Stories:** Bei zwei Artikeln ist der Durchschnitt nur das eine Paar, und
+0.75 verlangt dafür lediglich eine Kosinus-Ähnlichkeit von 0.25. Die erreichen schon zwei
+kurze Anrisstexte mit einem einzigen gemeinsamen seltenen Wort („Razzia“, „beendet“) – mit
+`min_df=2` fallen alle Wörter weg, die nur ein Artikel enthält, sodass das gemeinsame Wort
+fast den ganzen Vektor ausmacht. Eine Story aus genau zwei Artikeln braucht deshalb
+zusätzlich `clustering.min_pair_similarity` (Standard 0.30). Größere Stories sind davon nicht
+betroffen.
+
+**Erste Kalibrierung** (Stichprobe von Hand, damals mit Wortpaaren) an 519 Artikeln aus
+13 deutschen Feeds (24 h, RSS-Kurztexte):
 
 | Verfahren | Stories mit ≥ 2 Quellen | Größte Story | Befund |
 |-----------|------------------------:|-------------:|--------|
@@ -111,7 +124,91 @@ reichte, um Gipfeltreffen und Pressestreit zu einer Story zu verschmelzen.
 | **Average Linkage 0.75** | **90** | **10** | **sauber (Stichprobe)** |
 | Average Linkage 0.8 | 102 | 14 | erste falsche Paare |
 
-Laufzeit bei 2000 Artikeln: ca. 1 s, ca. 260 MB RAM.
+Die Stichprobe übersah viel: Nach den handmarkierten Daten (unten) waren 25 dieser 90 Stories
+unsinnig.
+
+**Messungen am Referenzsatz:** Dieselben 519 Artikel sind von Hand markiert: 59 Ereignisse
+(dieselbe konkrete Meldung, muss zusammen) und 27 neutrale Themen (verwandt oder
+Sammelbeitrag, weder gefordert noch Fehler); alle übrigen Paare dürfen nicht zusammen.
+`evaluate.py --gold` misst damit die paarweise Precision (P: Anteil der Artikelpaare in einer
+Story, die wirklich zusammengehören) und den Recall (R: Anteil der zusammengehörigen Paare, die
+eine Story bilden), und teilt die angezeigten Stories (≥ 2 Quellen) ein in *sauber* (kein
+falsches Paar), *gemischt* (echte Story mit Eindringling) und *unsinnig* (kein echtes Paar
+über Feeds hinweg). Schwelle jeweils 0.75:
+
+| Variante | P | R | F1 | Stories | sauber / gemischt / unsinnig |
+|----------|--:|--:|---:|--------:|-----------------------------:|
+| Wortpaare, ohne Untergrenze (bisher) | 0.839 | 0.486 | 0.616 | 90 | 62 / 3 / 25 |
+| Wortpaare, Untergrenze 0.30 | 0.909 | 0.475 | 0.624 | 68 | 55 / 3 / 10 |
+| Einzelwörter, ohne Untergrenze | 0.917 | 0.675 | 0.777 | 83 | 65 / 1 / 17 |
+| **Einzelwörter, Untergrenze 0.30 (Standard)** | **0.955** | **0.668** | **0.786** | **64** | **55 / 1 / 8** |
+| Einzelwörter, Untergrenze 0.35 | 0.980 | 0.659 | 0.788 | 54 | 50 / 1 / 3 |
+| Einzelwörter, Untergrenze 0.40 | 0.990 | 0.652 | 0.786 | 48 | 47 / 1 / 0 |
+
+- Wortpaare verschlechtern Precision *und* Recall. In 20 von 20 Zufallsstichproben (je 80 %) lagen Einzelwörter bei beiden vorn
+  (P 0.865 ± 0.019 statt 0.817 ± 0.024, R 0.657 ± 0.045 statt 0.525 ± 0.038)
+- Die Untergrenze 0.30 entfernt von 57 Zwei-Artikel-Stories aus verschiedenen Feeds 9 der 17
+  unsinnigen und 7 der 14 nur themenverwandten, aber auch 3 der 26 echten (Ähnlichkeit 0.27
+  bis 0.29: Clankontakte der Linkspartei, E-Roller-Urteil, Angriff in Düsseldorf). 0.35 kostet
+  zwei weitere echte (Klopp-Aufstellung 0.32, Explosionen in der Ukraine 0.33) und ist die
+  Wahl für eine strengere Startseite
+- Die Schwelle bleibt 0.75: Mit Einzelwörtern und Untergrenze 0.30 ergibt 0.70 P 0.941,
+  R 0.468; 0.80 ergibt P 0.878, R 0.718, aber 10 unsinnige und 5 gemischte Stories
+
+Wiederholung mit 25 Läufen im Abstand von 30 Minuten über die echte Story-Datenbank
+(`evaluate.py --replay 25`): Anteil der Stories einer Startseite, die im nächsten Lauf unter
+derselben ID stehen, davon mit geänderter Schlagzeile, ganz verschwunden, Überlappung der
+Top 10 und Rausch-Schlagzeilen (siehe unten) auf der letzten Startseite:
+
+| Variante | ID behalten | Schlagzeile geändert | verschwunden | Top 10 | Rausch-Schlagzeilen |
+|----------|------------:|---------------------:|-------------:|-------:|--------------------:|
+| Stand vor diesen Änderungen | 89.1 % | 5.1 % | 10.3 % | 5.96 | 6 / 50 |
+| **Standard** | **92.5 %** | **1.3 %** | **7.1 %** | **6.38** | **0 / 50** |
+| Untergrenze 0.35 | 95.5 % | 1.2 % | 4.4 % | 6.96 | 0 / 50 |
+
+Gemessen und verworfen (Wortpaare, Schwelle 0.75, falls nicht anders angegeben):
+
+- Ohne Stemming: P 0.818, R 0.409 (statt 0.839 / 0.486)
+- Ohne NLTK-Stopwords: R 0.357; eine zusätzliche Liste typischer Nachrichtenwörter („sagt“,
+  „Prozent“, „Millionen“) senkt R mit Einzelwörtern und Untergrenze 0.30 von 0.641 auf 0.595
+  und bringt 11 statt 8 unsinnige Stories; `max_df` 0.2 ändert nichts
+- Titel einfach statt doppelt: R 0.568 statt 0.648 (Einzelwörter); dreifach: keine
+  Verbesserung (0.845 / 0.482); nur Titel: P 0.417
+- Textbausteine entfernen („[ mehr ]“ der Tagesschau, taz und MDR, der Anrisstext „None“ der
+  Zeit): ändert eine einzige Story. Nur die ersten 400 Zeichen des Textes: kein Unterschied,
+  fast alle Feeds liefern ohnehin nur Anrisstexte
+- Werbung, Podcasts, Videos, Wetter usw. (43 Einträge) ganz aus dem Clustering nehmen
+  (Einzelwörter, Untergrenze 0.30): P/R praktisch gleich (0.952 / 0.634 statt 0.953 / 0.641),
+  nur 2 unsinnige Stories weniger. Sie werden deshalb nur als Schlagzeile zurückgestellt
+  (siehe Kanonisierung); nur der Ticker ohne Titel bleibt draußen
+- Zeichen-n-Gramme (3-5 Zeichen): P 0.931, R 0.673 – ähnlich gut, aber mit 45 000 statt
+  2 000 Merkmalen dreimal so langsam und nur mit neu kalibrierter Schwelle nutzbar
+- Zweiter Durchgang, der Stories mit ähnlichem Schwerpunkt zusammenlegt (Einzelwörter,
+  Untergrenze 0.30): bei Kosinus ≥ 0.4 keine Änderung, bei 0.35 R + 0.03, 4 Stories weniger
+- Andere Ranking-Formeln (Median- statt neuestes Alter, Quellen hoch 1.5, ohne Zeitabzug,
+  mit Zusammenhalt der Story): NDCG@10 gleich oder schlechter als die bestehende Formel
+- Schlagzeile = der Artikel nächst dem Schwerpunkt der Story: wechselt in 36-38 % der Läufe
+  die Schlagzeile (Ähnlichkeiten verschieben sich mit jedem neuen Artikel)
+
+Laufzeit bei 2000 Artikeln: Vektorisierung und Clustering 0.30 s (mit Wortpaaren 0.33 s),
+mit HTML-Parsing und Duplikaterkennung ca. 1.4 s; ca. 260 MB RAM.
+
+**Eigene Messungen:** `eval/export_corpus.py` speichert die Artikel des Zeitfensters aus
+Miniflux (`eval/corpus.json`, von git und dem Image ausgenommen: Die Texte gehören den
+Verlagen). `eval/gold.json` enthält nur die Markierungen des Referenzsatzes, nach URL, ohne
+Text; der Korpus dazu liegt nicht im Repository. Für eigene Feeds braucht es eigene
+Markierungen im selben Format:
+
+```bash
+cd intelligence
+python eval/export_corpus.py --out eval/corpus.json      # MINIFLUX_URL, MINIFLUX_API_KEY
+python evaluate.py --corpus eval/corpus.json --gold eval/gold.json --replay 25
+python evaluate.py --corpus eval/corpus.json --gold eval/gold.json 0.7 0.75 0.8 \
+    --ngram-max 2 --min-pair-similarity 0 --show-junk
+```
+
+Ohne `--gold` gibt `evaluate.py` nur die Stories aus. Die Unit-Tests prüfen den Ablauf an
+einem kleinen erfundenen Satz (`tests/fixtures/eval_*.json`).
 
 Die Top-Stories-Seite zeigt nur Stories aus mindestens zwei Feeds (`web.min_sources`):
 Werbeblöcke („Anzeige: … Tiefstpreis“) oder Serien einer Redaktion ähneln sich
@@ -136,7 +233,12 @@ Innerhalb einer Story gilt ein Paar als Duplikat, wenn (in dieser Reihenfolge):
 
 - Eigene Term-Frequenz-Vektoren über das volle Vokabular: Das Clustering verwirft seltene Terme (`min_df`), und genau diese unterscheiden zwei Berichte zum selben Thema
 - Kanonisierung: längster (Textlänge ohne HTML), priorisierter oder neuester Artikel; Artikel mit
-  Titel vor solchen ohne. Bei Gleichstand gewinnt die kleinere Artikel-ID (zuerst gespeichert) –
+  Titel vor solchen ohne, danach Titel, die keinem `clustering.noise_title_patterns` entsprechen
+  (Werbung „Anzeige:“/„heise-Angebot:“, Paywall „(g+)“/„heise+“/„SPIEGEL+“/„F+“/„SZ Plus“,
+  Podcasts, Liveblogs und -ticker, „Video:“, Wetter, „News des Tages“, „Was jetzt?“,
+  Briefings). Solche Artikel bleiben Teil der Story, stehen aber nur oben, wenn es keinen
+  anderen gibt: Im Referenzsatz waren 10 von 90 Schlagzeilen Werbung, Podcasts oder Ähnliches,
+  weil `longest` gerade lange Werbetexte bevorzugt. Bei Gleichstand gewinnt die kleinere Artikel-ID (zuerst gespeichert) –
   sonst tauschten identische Kopien je nach Reihenfolge der API-Antwort die Rollen, und beide
   wurden nach und nach als gelesen markiert. Aus demselben Grund bleibt ein Artikel, den aRSSe
   schon als gelesen markiert hat, nie anstelle einer ungelesenen Kopie stehen, auch wenn
@@ -254,8 +356,28 @@ beim Anbieter statt auf Miniflux (ohne gültige URL nur als Text).
 Story, auch wenn diese weiterläuft; danach werden Stories gelöscht, die so lange nicht mehr
 aufgetaucht sind oder keine Artikel mehr haben.
 
+**Schlagzeile:** Die Schlagzeile einer Story bleibt, solange ihr Artikel noch dazugehört,
+kein Duplikat ist (Duplikate werden als gelesen markiert) und nicht als Rauschen gilt – auch
+wenn inzwischen ein längerer Artikel dazugekommen ist. Sonst wechselte der Titel mit jedem
+längeren Bericht, und der E-Ink-Reader müsste die ganze Seite neu aufbauen.
+
 **Ranking:** `Anzahl Quellen / (1 + Alter des neuesten Artikels in Stunden / 12)`, beides
-über die Artikel im Zeitfenster
+über die Artikel im Zeitfenster. Stories, deren Artikel im Fenster alle einem der
+`web.exclude_patterns` entsprechen (Standard: `^Wetter\b`, der Wetterbericht mehrerer Sender),
+erscheinen nicht auf der Startseite; ihre Story-Seite bleibt erreichbar.
+
+**Werbung schon in Miniflux ausfiltern (optional):** Miniflux kann Einträge beim Abruf
+verwerfen (*Einstellungen > Eintrags-Sperrregeln* für alle Feeds oder dasselbe Feld in den
+Einstellungen eines Feeds). Mit der Regel
+
+```
+EntryTitle=(?i)^(Anzeige|heise-Angebot):
+```
+
+landen Werbeeinträge (im 24-Stunden-Referenzsatz 10 bei Golem, 4 bei Heise) gar nicht erst
+in Miniflux.
+Das ist eine bewusste Entscheidung des Nutzers und deshalb nicht voreingestellt: Die Einträge
+fehlen dann auch in der normalen Miniflux-Ansicht.
 
 #### Container-Start
 Docker legt ein fehlendes Bind-Mount-Verzeichnis als root an. Deshalb startet der

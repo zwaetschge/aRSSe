@@ -23,8 +23,23 @@ clustering:
   # Maximale durchschnittliche Kosinus-Distanz der Artikel einer Story.
   # Niedriger = kleinere, schärfere Stories; höher = mehr Artikel in Stories,
   # aber ab ca. 0.8 landen unverwandte Themen zusammen.
-  # 0.75 ist an ~500 echten Artikeln aus 13 deutschen Nachrichtenfeeds kalibriert.
+  # 0.75 ist an ~500 echten, handmarkierten Artikeln aus 13 deutschen
+  # Nachrichtenfeeds kalibriert (docs/ARCHITECTURE.md, „Messungen“).
   threshold: 0.75
+
+  # Mindest-Ähnlichkeit (Kosinus, 0-1) einer Story aus nur zwei Artikeln.
+  # Für zwei Artikel verlangt threshold nur 0.25 – das erreicht schon ein
+  # einziges gemeinsames seltenes Wort („Razzia“). Am Referenzsatz entfernt
+  # 0.30 von 57 Zwei-Artikel-Stories 9 der 17 unsinnigen, 7 der 14 nur
+  # themenverwandten und 3 der 26 echten; 0.35 entfernt 14 unsinnige und
+  # 5 echte. 0 = aus.
+  # Umgebungsvariable: CLUSTERING_MIN_PAIR_SIMILARITY
+  min_pair_similarity: 0.30
+
+  # Längste Wortfolge im Vokabular: 1 = einzelne Wörter. Wortpaare (2)
+  # machten Precision und Recall am Referenzsatz schlechter.
+  # Umgebungsvariable: CLUSTERING_NGRAM_MAX
+  ngram_max: 1
 
   # Maximale Features für TF-IDF Vektorisierung
   max_features: 5000
@@ -34,6 +49,25 @@ clustering:
 
   # Wortstämme bilden ("Bundeskanzlers" -> "bundeskanzl")
   stemming: true
+
+  # Titel, die keine Schlagzeile sein sollen, solange die Story einen
+  # anderen Artikel hat: Werbung, Paywall-Anrisse, Podcasts, Liveblogs,
+  # Videos, Wetter, Tagesüberblicke. Reguläre Ausdrücke, Groß-/Kleinschreibung
+  # egal, ^ = Titelanfang. Die Artikel bleiben in der Story. [] = aus.
+  noise_title_patterns:
+    - '^(Anzeige|heise-Angebot):'
+    - '^\((g|S)\+\)'
+    - 'heise\+'
+    - 'SPIEGEL\+'
+    - '\bF\+'
+    - 'SZ Plus'
+    - 'Podcasts?\b'
+    - 'Live-?blog|Live-?ticker|Newsblog'
+    - '^Video:'
+    - '^Wetter\b'
+    - 'News des Tages'
+    - '^Was jetzt\?'
+    - 'Briefing'
 
 # Deduplizierung
 # Duplikate sind (1) derselbe Artikel doppelt geliefert (gleiche URL, gleicher
@@ -115,6 +149,11 @@ web:
   # Ältere Artikel einer Story (vor dem Zeitfenster), die ihre Seite unter
   # „Frühere Berichte“ zusätzlich auflistet (0 = keine)
   earlier_articles_max: 20
+  # Stories nicht anzeigen, deren Artikel (im Zeitfenster) alle einen dieser
+  # Titel haben – reguläre Ausdrücke wie bei noise_title_patterns.
+  # Standard: der Wetterbericht, den mehrere Sender bringen. [] = alle zeigen
+  exclude_patterns:
+    - '^Wetter\b'
   # Nur Anfragen an diese Hostnamen beantworten (Schutz vor DNS-Rebinding),
   # z.B. ["tower.local", "192.168.1.10"]. localhost und 127.0.0.1 gehen
   # immer. Keine Platzhalter (*.example.com). Leer = jeder Hostname

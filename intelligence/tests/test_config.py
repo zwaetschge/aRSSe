@@ -119,6 +119,15 @@ def test_miniflux_port_with_host_ip_binding(tmp_path, monkeypatch, caplog):
     ('miniflux:\n  url: ""\n', 'miniflux.url'),
     ('miniflux:\n  public_url: null\n', 'miniflux.public_url'),
     ('storage:\n  db_path: ""\n', 'storage.db_path'),
+    ('clustering:\n  ngram_max: 0\n', 'clustering.ngram_max'),
+    ('clustering:\n  ngram_max: 4\n', 'clustering.ngram_max'),
+    ('clustering:\n  ngram_max: 1.5\n', 'clustering.ngram_max'),
+    ('clustering:\n  min_pair_similarity: 1.0\n', 'clustering.min_pair_similarity'),
+    ('clustering:\n  min_pair_similarity: -0.1\n', 'clustering.min_pair_similarity'),
+    ('clustering:\n  min_pair_similarity: "0.3"\n', 'clustering.min_pair_similarity'),
+    ("clustering:\n  noise_title_patterns: ['^(Anzeige:']\n", 'clustering.noise_title_patterns'),
+    ('clustering:\n  noise_title_patterns: 5\n', 'clustering.noise_title_patterns'),
+    ("web:\n  exclude_patterns: ['[Wetter']\n", 'web.exclude_patterns'),
 ])
 def test_values_that_would_break_silently_are_rejected(tmp_path, monkeypatch, yaml_text, key):
     for var in ('CLUSTERING_THRESHOLD', 'DEDUP_THRESHOLD', 'MINIFLUX_URL',
@@ -329,3 +338,45 @@ def test_trusted_proxies_must_not_cover_everyone(web_env, caplog):
     with caplog.at_level('WARNING'):
         load_config(None)
     assert 'trusted_proxies' not in caplog.text
+
+
+def test_clustering_quality_defaults(monkeypatch):
+    for var in ('CLUSTERING_NGRAM_MAX', 'CLUSTERING_MIN_PAIR_SIMILARITY'):
+        monkeypatch.delenv(var, raising=False)
+    cfg = load_config(None)
+    assert cfg.clustering.ngram_max == 1
+    assert cfg.clustering.min_pair_similarity == 0.30
+    assert r'^(Anzeige|heise-Angebot):' in cfg.clustering.noise_title_patterns
+    assert cfg.web.exclude_patterns == [r'^Wetter\b']
+
+
+def test_shipped_config_lists_the_default_patterns(monkeypatch):
+    from pathlib import Path
+    from config import DEFAULT_NOISE_TITLE_PATTERNS
+    for var in ('CLUSTERING_THRESHOLD', 'DEDUP_THRESHOLD', 'CLUSTERING_NGRAM_MAX',
+                'CLUSTERING_MIN_PAIR_SIMILARITY'):
+        monkeypatch.delenv(var, raising=False)
+    cfg = load_config(str(Path(__file__).resolve().parent.parent / 'config.yaml'))
+    assert cfg.clustering.noise_title_patterns == DEFAULT_NOISE_TITLE_PATTERNS
+    assert cfg.web.exclude_patterns == [r'^Wetter\b']
+    assert (cfg.clustering.ngram_max, cfg.clustering.min_pair_similarity) == (1, 0.30)
+
+
+def test_clustering_quality_env(monkeypatch):
+    monkeypatch.setenv('CLUSTERING_NGRAM_MAX', '2')
+    monkeypatch.setenv('CLUSTERING_MIN_PAIR_SIMILARITY', '0.35')
+    cfg = load_config(None)
+    assert cfg.clustering.ngram_max == 2
+    assert cfg.clustering.min_pair_similarity == 0.35
+    monkeypatch.setenv('CLUSTERING_MIN_PAIR_SIMILARITY', 'hoch')
+    with pytest.raises(ConfigError, match='CLUSTERING_MIN_PAIR_SIMILARITY'):
+        load_config(None)
+
+
+def test_pattern_lists(tmp_path):
+    # A single string is one pattern, even with commas; an empty list disables
+    cfg = load_config(write_yaml(tmp_path, (
+        'clustering:\n  noise_title_patterns: "^(Anzeige|Werbung){1,2}:"\n'
+        'web:\n  exclude_patterns: []\n')))
+    assert cfg.clustering.noise_title_patterns == ['^(Anzeige|Werbung){1,2}:']
+    assert cfg.web.exclude_patterns == []

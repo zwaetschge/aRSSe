@@ -83,6 +83,8 @@ class NewsClusterer:
         self.client = client or self._create_client()
         self.stopwords = set(self._get_stopwords())
         self.stemmer = self._get_stemmer()
+        self.noise_patterns = [re.compile(p, re.IGNORECASE)
+                               for p in config.clustering.noise_title_patterns]
         # Whose API key is it? Asked once Miniflux answers (see check_api_key_user)
         self.api_key_checked = False
 
@@ -135,7 +137,9 @@ class NewsClusterer:
             tokenizer=self._tokenize,
             token_pattern=None,
             lowercase=False,  # _preprocess_entry already lowercases
-            ngram_range=(1, 2),  # Unigrams and bigrams
+            # Single words by default: on the reference corpus bigrams cost
+            # precision and recall (docs/ARCHITECTURE.md, 'Messungen')
+            ngram_range=(1, self.config.clustering.ngram_max),
             min_df=2,  # Ignore terms that appear in less than 2 documents
             max_df=0.95,  # Ignore terms that appear in more than 95% of documents
             sublinear_tf=True,
@@ -200,9 +204,16 @@ class NewsClusterer:
 
         auto_marked holds the IDs of entries that aRSSe marked read before;
         see _detect_duplicates and _canonical_key.
+
+        Untitled multi-topic tickers ('+++ ... +++ ...') are left out: they
+        touch every story of the day and would pull unrelated ones together.
+        A story of two articles needs a cosine similarity of at least
+        clustering.min_pair_similarity: for two articles, average linkage
+        only asks for 1 - threshold, which one shared rare word reaches.
         """
         texts = [self._preprocess_entry(e) for e in entries]
-        valid_indices = [i for i, t in enumerate(texts) if t]
+        valid_indices = [i for i, t in enumerate(texts)
+                         if t and not _is_ticker(entries[i])]
         if len(valid_indices) < 2:
             logger.info("Not enough valid articles for clustering (%d)", len(valid_indices))
             return []
@@ -216,18 +227,22 @@ class NewsClusterer:
             logger.warning("Vectorization failed: %s", e)
             return []
 
+        distances = cosine_distances(tfidf_matrix)
         labels = AgglomerativeClustering(
             n_clusters=None,
             metric='precomputed',
             linkage='average',
             distance_threshold=self.config.clustering.threshold,
-        ).fit(cosine_distances(tfidf_matrix)).labels_
+        ).fit(distances).labels_
 
         cluster_map = {}
         for idx, label in enumerate(labels):
             cluster_map.setdefault(label, []).append(idx)
         # Articles nobody else wrote about stay out of stories
         cluster_map = {k: v for k, v in cluster_map.items() if len(v) >= 2}
+        min_similarity = self.config.clustering.min_pair_similarity
+        cluster_map = {k: v for k, v in cluster_map.items()
+                       if len(v) > 2 or 1 - distances[v[0], v[1]] >= min_similarity}
 
         clusters = []
         for member_indices in cluster_map.values():
@@ -245,6 +260,7 @@ class NewsClusterer:
                 headline_entry_id=headline_id,
                 duplicate_ids=duplicates,
                 copy_ids=copies,
+                noise_ids={e['id'] for e in cluster_entries if not self._headline_worthy(e)},
             ))
 
         logger.info("Found %d clusters", len(clusters))
@@ -474,10 +490,11 @@ class NewsClusterer:
         Uses the configured strategy: longest (plain text, not HTML),
         source_priority or newest. Entries with a title always win over
         untitled ones (e.g. news ticker pages), so duplicate detection and
-        the story headline agree. Next, entries that aRSSe has not marked
-        read (not in auto_marked) win over marked ones. On a tie the lowest
-        (first stored) ID wins: identical copies must not swap roles with
-        the order in which Miniflux returns them.
+        the story headline agree. Next, titles that match none of
+        clustering.noise_title_patterns (ads, podcasts, live blogs) win,
+        then entries that aRSSe has not marked read (not in auto_marked).
+        On a tie the lowest (first stored) ID wins: identical copies must
+        not swap roles with the order in which Miniflux returns them.
         """
         strategy = self.config.deduplication.canonical_strategy
 
@@ -499,7 +516,17 @@ class NewsClusterer:
             key = entry['_text_len']
 
         has_title = bool((entry.get('title') or '').strip())
-        return (has_title, entry['id'] not in auto_marked, key, -entry['id'])
+        return (has_title, not self._is_noise(entry), entry['id'] not in auto_marked,
+                key, -entry['id'])
+
+    def _is_noise(self, entry: dict) -> bool:
+        """True if the title matches one of clustering.noise_title_patterns."""
+        title = (entry.get('title') or '')[:MAX_TITLE_CHARS]
+        return any(pattern.search(title) for pattern in self.noise_patterns)
+
+    def _headline_worthy(self, entry: dict) -> bool:
+        """An entry may head a story: it has a title that is not noise."""
+        return bool((entry.get('title') or '').strip()) and not self._is_noise(entry)
 
     def _mark_duplicates_read(self, entries: list, clusters: list) -> int:
         """
@@ -557,6 +584,13 @@ def check_api_key_user(client) -> bool:
                        "for reading and use its API key (README, 'Absicherung').",
                        user.get('username', '?'))
     return True
+
+
+def _is_ticker(entry: dict) -> bool:
+    """An untitled news ticker listing many topics ('+++ ... +++ ...')."""
+    if (entry.get('title') or '').strip():
+        return False
+    return entry.get('_snippet', '').startswith('+++')
 
 
 def _normalize(text: str) -> str:

@@ -256,13 +256,16 @@ def create_app(config: Config, store: StoryStore) -> Flask:
     def helpers():
         return {'entry_link': entry_link, 'safe_url': safe_url, 'miniflux_url': miniflux_base()}
 
+    def top_stories() -> list:
+        return store.top_stories(max_age_hours, config.web.max_stories,
+                                 config.web.min_sources, config.web.earlier_articles_max,
+                                 config.web.exclude_patterns)
+
     @app.get('/')
     def index():
-        stories = store.top_stories(max_age_hours, config.web.max_stories,
-                                    config.web.min_sources, config.web.earlier_articles_max)
         return render_template(
             'index.html',
-            stories=stories,
+            stories=top_stories(),
             per_story=config.web.articles_per_story,
             last_success=store.get_meta('last_success'),
         )
@@ -276,9 +279,7 @@ def create_app(config: Config, store: StoryStore) -> Flask:
 
     @app.get('/api/stories')
     def api_stories():
-        return jsonify(store.top_stories(max_age_hours, config.web.max_stories,
-                                         config.web.min_sources,
-                                         config.web.earlier_articles_max))
+        return jsonify(top_stories())
 
     @app.get('/healthz')
     def healthz():
