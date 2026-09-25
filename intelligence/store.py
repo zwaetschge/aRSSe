@@ -200,7 +200,8 @@ class FrontPage:
     total: int
     # [(section, topic groups)], most first; counts ignore the chosen section
     sections: list = field(default_factory=list)
-    # Stories left out because all their articles in the window are read
+    # Topic groups of the chosen section that only read stories fill
+    # (what ?alle=1 adds; 0 unless hide_read)
     hidden_read: int = 0
 
 
@@ -534,13 +535,21 @@ class StoryStore:
         for name in {s['section'] for s in shown if s['section']}:
             counts[name] = min(len(group_topics([s for s in shown if s['section'] == name])),
                                limit)
-        groups = group_topics([s for s in shown
-                               if section is None or s['section'] == section])[:limit]
+        def in_section(story):
+            return section is None or story['section'] == section
+
+        groups = group_topics([s for s in shown if in_section(s)])[:limit]
+        # What ?alle=1 adds to this page: slots of the same section, counted
+        # like total, so the link never leads to a page with nothing new
+        hidden = 0
+        if hide_read:
+            hidden = len(group_topics([s for s in ranked if in_section(s)])[:limit]) \
+                - len(groups)
         return FrontPage(
             stories=groups[offset:offset + page_size],
             total=len(groups),
             sections=sorted(counts.items(), key=lambda item: (-item[1], item[0])),
-            hidden_read=len(ranked) - len(shown),
+            hidden_read=hidden,
         )
 
     def related_stories(self, story: dict, max_age_hours: int, min_sources: int = 1,

@@ -423,7 +423,7 @@ def test_topic_threshold_setting(tmp_path, monkeypatch, clean_env):
     for text in ('clustering:\n  topic_threshold: 0.7\n',
                  'clustering:\n  topic_threshold: 0.75\n',
                  'clustering:\n  topic_threshold: 1.0\n',
-                 'clustering:\n  threshold: 0.9\n',
+                 'clustering:\n  threshold: 0.95\n  topic_threshold: 0.92\n',
                  "clustering:\n  topic_threshold: '0.9'\n"):
         with pytest.raises(ConfigError, match='topic_threshold'):
             load_config(write_yaml(tmp_path, text))
@@ -432,6 +432,26 @@ def test_topic_threshold_setting(tmp_path, monkeypatch, clean_env):
     monkeypatch.setenv('CLUSTERING_TOPIC_THRESHOLD', 'viel')
     with pytest.raises(ConfigError, match='CLUSTERING_TOPIC_THRESHOLD'):
         load_config(None)
+
+
+def test_a_high_threshold_turns_the_default_topics_off(tmp_path, monkeypatch, clean_env,
+                                                      caplog):
+    # A CLUSTERING_THRESHOLD that was valid before topics existed still loads,
+    # with the shipped config.yaml as well
+    shipped = str(Path(__file__).resolve().parent.parent / 'config.yaml')
+    monkeypatch.setenv('CLUSTERING_THRESHOLD', '0.9')
+    for path in (None, shipped):
+        cfg = load_config(path)
+        assert cfg.clustering.threshold == 0.9 and cfg.clustering.topic_threshold == 0
+    assert 'topics are off' in caplog.text
+    assert load_config(write_yaml(tmp_path, 'clustering:\n  threshold: 0.95\n')) \
+        .clustering.topic_threshold == 0
+    # Set on purpose, a topic threshold at or below the threshold stays an error
+    monkeypatch.setenv('CLUSTERING_TOPIC_THRESHOLD', '0.9')
+    with pytest.raises(ConfigError, match='topic_threshold'):
+        load_config(None)
+    monkeypatch.setenv('CLUSTERING_TOPIC_THRESHOLD', '0.95')
+    assert load_config(shipped).clustering.topic_threshold == 0.95
 
 
 def test_path_sections_setting(tmp_path, clean_env):

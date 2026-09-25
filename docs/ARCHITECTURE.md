@@ -121,7 +121,9 @@ betroffen.
 Seiten beleuchten (Klopps Debüt, seine Aufstellung, der gegnerische Trainer). Ein zweiter
 Average-Linkage-Durchgang über dieselbe Distanzmatrix mit der großzügigeren
 `clustering.topic_threshold` (Standard 0.9, `CLUSTERING_TOPIC_THRESHOLD`, muss über
-`threshold` liegen, 0 = aus) ordnet jede Story einem Thema zu (das Thema der meisten ihrer
+`threshold` liegen, 0 = aus; liegt nur der Standard nicht darüber, etwa bei
+`CLUSTERING_THRESHOLD=0.9` aus der Zeit vor den Themen, schaltet eine Warnung im Log die
+Themen ab, statt den Start zu verweigern) ordnet jede Story einem Thema zu (das Thema der meisten ihrer
 Artikel). `topic_key` ist die kleinste Artikel-ID unter den Stories des Themas. Die Stories
 selbst bleiben unverändert – anders als der verworfene Durchgang, der Stories
 zusammenlegte (unten); das Thema steuert nur die Anzeige: Die Startseite zeigt je Thema die
@@ -506,7 +508,8 @@ Teil-Refresh mit Geisterbildern kostet:
   meiste zuerst, gezählt wie die Seite der Rubrik) führt zu `?rubrik=Name`; auch
   `/api/stories?rubrik=` filtert. Eine leere Rubrik ist eine leere Seite, keine 404.
 - *Gelesen:* Gelesene Stories fehlen (`?alle=1` zeigt sie mit „gelesen“, die Statuszeile
-  bietet „N gelesene zeigen“), und die bestplatzierte ungelesene Story führt ihr Thema an.
+  bietet „N gelesene zeigen“: so viele Plätze kämen mit `?alle=1` auf dieser Rubrik-Seite
+  hinzu, gezählt wie die Seiten, also je Thema einmal), und die bestplatzierte ungelesene Story führt ihr Thema an.
   Jede Story mit ungelesenen Artikeln hat einen Knopf „Story gelesen (N)“: ein Formular
   ohne JavaScript (`POST /story/<id>/gelesen`, Feld `next` = aufrufende Seite, auf der
   Startseite weggelassen). Die Antwort ist `303` auf `next`, wenn es mit genau einem `/`
@@ -514,7 +517,10 @@ Teil-Refresh mit Geisterbildern kostet:
   Gibt es die Seite danach nicht mehr (die einzige Story der letzten Seite ist gelesen), geht
   es auf die neue letzte Seite statt auf eine 404.
   Ohne `MINIFLUX_API_KEY` fehlt der Knopf (`503`); ist Miniflux nicht erreichbar, bleibt alles
-  ungelesen (`502`). Eine wieder erscheinende Story trägt „N neu“.
+  ungelesen (`502`). Eine nach „Story gelesen“ wieder erscheinende Story trägt „N neu“
+  (ihre ungelesenen Artikel); nach Lesen in Miniflux fehlt die Angabe, denn dort lässt sich
+  „ganze Story gelesen“ nicht von „einen Artikel gelesen“ unterscheiden – sonst stünde nach
+  einem gelesenen Artikel „9 neu“ da.
 - *Suche:* Das Suchfeld im Kopf führt zu `/suche?q=…` (2 bis 100 Zeichen, sonst nur das
   Formular): `LIKE` über Titel und Anriss aller gespeicherten Artikel (Aufbewahrung, nicht
   nur Zeitfenster), `%` und `_` als Zeichen, Groß-/Kleinschreibung auch bei Umlauten egal

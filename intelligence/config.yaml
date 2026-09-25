@@ -45,7 +45,8 @@ clustering:
   # durchschnittliche Distanz eines Themas, größer als threshold; die Grenzen
   # der Stories selbst ändern sich nicht. Am Referenzsatz fasst 0.9 34 der
   # 63 Stories zu 15 Themen zusammen (2 davon unpassend), 0.85 17 zu 8.
-  # 0 = aus. Umgebungsvariable: CLUSTERING_TOPIC_THRESHOLD
+  # 0 = aus; bleibt es bei 0.9 und liegt threshold nicht darunter, sind die
+  # Themen aus (Warnung im Log). Umgebungsvariable: CLUSTERING_TOPIC_THRESHOLD
   topic_threshold: 0.9
 
   # Längste Wortfolge im Vokabular: 1 = einzelne Wörter. Wortpaare (2)

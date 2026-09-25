@@ -667,6 +667,16 @@ def _validate(config: Config) -> None:
     if not 0.0 <= config.clustering.min_pair_similarity < 1.0:
         raise ConfigError("clustering.min_pair_similarity must be in [0, 1)")
     topic = config.clustering.topic_threshold
+    if (topic != 0 and topic == ClusteringConfig().topic_threshold
+            and not _env('CLUSTERING_TOPIC_THRESHOLD')
+            and not config.clustering.threshold < topic):
+        # Only the default (or the shipped config.yaml) sets it: a threshold
+        # that used to be valid must not stop the service after an upgrade
+        logger.warning("clustering.threshold %s is not below the default "
+                       "clustering.topic_threshold %s: topics are off. Set "
+                       "CLUSTERING_TOPIC_THRESHOLD above the threshold, or to 0",
+                       config.clustering.threshold, topic)
+        config.clustering.topic_threshold = topic = 0
     if topic != 0 and not config.clustering.threshold < topic < 1.0:
         raise ConfigError(f"clustering.topic_threshold must be above clustering.threshold "
                           f"({config.clustering.threshold}) and below 1, or 0 (off); "

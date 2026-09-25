@@ -107,7 +107,7 @@ Die Miniflux-API kann keine Tags oder eigenen Metadaten schreiben – deshalb br
 
 Die Seiten sind für E-Ink gebaut: kurze Seiten statt langem Scrollen, nur absolute Uhrzeiten („Stand 18:32“, „Mi 14:53“ – relative Angaben wie „vor 5 Min.“ stimmen auf einem stehenden Bildschirm bald nicht mehr), jede Quelle zuerst mit einem Artikel statt mehrerer aus demselben Feed, und Links, die als ganze Zeile mindestens 44 px hoch antippbar sind. Die Uhrzeiten gelten in der Zeitzone `TZ` aus `.env` (Standard Europe/Berlin) oder `web.timezone` in `config.yaml`.
 
-**Gelesen:** Eine Story, deren Artikel im Zeitfenster alle gelesen sind, verschwindet von der Startseite (die Statuszeile bietet „N gelesene zeigen“). „Story gelesen (N)“ markiert mit einem Tipp alle ungelesenen Artikel der Story in Miniflux als gelesen – statt neun fast gleicher Meldungen einzeln. Kommen danach neue Artikel hinzu, erscheint die Story wieder mit „N neu“. Was in Miniflux selbst gelesen wird, übernehmen die Top Stories alle 5 Minuten (`scheduling.status_sync_minutes`). Der Knopf braucht den `MINIFLUX_API_KEY`; ohne Anmeldung (`WEB_AUTH_MODE=none`) kann jeder, der den Port erreicht, Stories als gelesen markieren – fremde Webseiten können es nicht (siehe „Absicherung“).
+**Gelesen:** Eine Story, deren Artikel im Zeitfenster alle gelesen sind, verschwindet von der Startseite (die Statuszeile bietet „N gelesene zeigen“). „Story gelesen (N)“ markiert mit einem Tipp alle ungelesenen Artikel der Story in Miniflux als gelesen – statt neun fast gleicher Meldungen einzeln. Kommen danach neue Artikel hinzu, erscheint die Story wieder mit „N neu“. Was in Miniflux selbst gelesen wird, übernehmen die Top Stories alle 5 Minuten (`scheduling.status_sync_minutes`); auch eine so gelesene Story verschwindet und kommt mit neuen Artikeln zurück, dann aber ohne „N neu“ (aRSSe weiß nicht, ob Sie in Miniflux die ganze Story gelesen haben oder nur einen Artikel davon). Der Knopf braucht den `MINIFLUX_API_KEY`; ohne Anmeldung (`WEB_AUTH_MODE=none`) kann jeder, der den Port erreicht, Stories als gelesen markieren – fremde Webseiten können es nicht (siehe „Absicherung“).
 
 **Rubriken:** Politik, Sport, Technik, Regional usw. kommen aus der Kategorie des Feeds in Miniflux. Für Feeds in der Standardkategorie „All“ entscheidet der Pfad der Artikel-URL (`tagesschau.de/ausland/…` → Politik, `…/sport/…` → Sport; `web.path_sections` in `config.yaml`); eine Story gehört zur Rubrik der meisten ihrer Artikel.
 
@@ -224,7 +224,7 @@ Alternativ können folgende Apps die Miniflux-API nutzen:
 
 ## Absicherung
 
-Ohne weitere Einstellungen sind Miniflux (Port 8080) und die Top Stories (Port 8081) im ganzen Heimnetz erreichbar. Miniflux verlangt eine Anmeldung, die Top Stories nicht: Wer Port 8081 erreicht, sieht Ihre Abos und was Sie gelesen haben – der Gast im WLAN ebenso wie ein Gerät im Netz. Beim Start steht dazu eine Warnung im Log.
+Ohne weitere Einstellungen sind Miniflux (Port 8080) und die Top Stories (Port 8081) im ganzen Heimnetz erreichbar. Miniflux verlangt eine Anmeldung, die Top Stories nicht: Wer Port 8081 erreicht, sieht Ihre Abos und was Sie gelesen haben und kann mit „Story gelesen“ Artikel in Ihrem Miniflux als gelesen markieren – der Gast im WLAN ebenso wie ein Gerät im Netz. Beim Start steht dazu eine Warnung im Log.
 
 ### Top Stories absichern
 

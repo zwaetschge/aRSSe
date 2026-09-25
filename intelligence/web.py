@@ -311,7 +311,8 @@ def create_app(config: Config, store: StoryStore, client=None) -> Flask:
                      if config.web.allowed_hosts else None)
     if auth.mode == 'none':
         logger.warning("Top Stories are not protected (web.auth.mode=none): everyone who "
-                       "reaches port 8081 can read your subscriptions and read status. Set "
+                       "reaches port 8081 can read your subscriptions and read status, and "
+                       "mark stories read in your Miniflux ('Story gelesen'). Set "
                        "WEB_AUTH_MODE=basic with WEB_USERNAME/WEB_PASSWORD, or protect the "
                        "port at your reverse proxy (README, 'Absicherung').")
     else:

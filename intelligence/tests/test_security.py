@@ -237,7 +237,10 @@ def test_post_needs_auth_before_origin(basic_config, store):
 def test_startup_warns_without_auth(config, store, caplog):
     with caplog.at_level(logging.WARNING, logger='arsse-intelligence'):
         create_app(config, store)
-    assert any('web.auth.mode=none' in r.getMessage() for r in caplog.records)
+    warning = next(r.getMessage() for r in caplog.records
+                   if 'web.auth.mode=none' in r.getMessage())
+    # Port 8081 also writes to Miniflux ('Story gelesen')
+    assert 'mark stories read in your Miniflux' in warning
 
 
 def test_no_warning_with_auth(basic_config, store, caplog):

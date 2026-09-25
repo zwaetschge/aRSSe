@@ -122,6 +122,44 @@ def test_story_read_on_the_last_page_returns_to_the_new_last_page(config, store)
     assert http.get(response.headers['Location']).status_code == 200
 
 
+def sectioned(e, section):
+    """entry e as the clusterer labels it for section"""
+    e['_section'] = section
+    return e
+
+
+def test_read_link_counts_what_all_adds_to_the_section_page(config, store):
+    # Politik: story A; Sport: stories B, C and D, where C and D are one topic
+    entries = [sectioned(entry(1, 1), 'Politik'), sectioned(entry(2, 2), 'Politik'),
+               *(sectioned(entry(i, i % 3 + 1, hours_ago=i / 10), 'Sport')
+                 for i in range(3, 9))]
+    assigned = store.save_run(entries, [ClusterResult([1, 2], 1, set()),
+                                        ClusterResult([3, 4], 3, set()),
+                                        ClusterResult([5, 6], 5, set(), topic_key=5),
+                                        ClusterResult([7, 8], 7, set(), topic_key=5)])
+    story_a, story_b, story_c, story_d = (assigned[i] for i in range(4))
+    http = create_app(config, store, FakeClient([])).test_client()
+    http.post(f'/story/{story_a}/gelesen', headers=SAME_ORIGIN)
+    # A read Politik story adds nothing to the Sport page
+    sport = http.get('/?rubrik=Sport').get_data(as_text=True)
+    assert listed(sport) == 2 and 'gelesene zeigen' not in sport
+    politik = http.get('/?rubrik=Politik').get_data(as_text=True)
+    assert listed(politik) == 0 and '1 gelesene zeigen' in politik
+
+    # Two read stories of one topic take one slot
+    for story in (story_c, story_d):
+        http.post(f'/story/{story}/gelesen', headers=SAME_ORIGIN)
+    sport = http.get('/?rubrik=Sport').get_data(as_text=True)
+    assert listed(sport) == 1 and '1 gelesene zeigen' in sport
+    assert listed(http.get('/?rubrik=Sport&alle=1').get_data(as_text=True)) == 2
+    alle = http.get('/').get_data(as_text=True)
+    assert listed(alle) == 1 and '2 gelesene zeigen' in alle
+    assert listed(http.get('/?alle=1').get_data(as_text=True)) == 3
+    # Beyond web.max_stories nothing is added either
+    assert store.front_page(24, 1, 0, 10, hide_read=True).hidden_read == 0
+    assert store.front_page(24, 50, 0, 10, section='Sport').hidden_read == 0
+
+
 @pytest.mark.parametrize('target', ['//evil.example', '//evil.example/x', '/\\evil.example',
                                     'http://evil.example/', 'https:evil.example', '',
                                     'evil', '/\r\nSet-Cookie: x=1', '/' + 'a' * 3000])
