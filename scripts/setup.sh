@@ -379,8 +379,59 @@ create_directories() {
     mkdir -p "$data_dir/postgresql" "$data_dir/intelligence"
     chown "${puid:-1000}:${pgid:-1000}" "$data_dir/intelligence" 2>/dev/null || true
     print_step "Datenverzeichnis: $data_dir"
+    prepare_user_config "$data_dir/intelligence/config.yaml" "${puid:-1000}:${pgid:-1000}"
 
     echo ""
+}
+
+# Wurde intelligence/config.yaml im Git-Arbeitsverzeichnis geändert? (So
+# stand es früher im README; heute blockiert das 'git pull'.)
+reference_config_modified() {
+    local rc=0
+    command -v git &> /dev/null || return 1
+    git -C "$PROJECT_DIR" ls-files --error-unmatch intelligence/config.yaml &> /dev/null \
+        || return 1
+    git -C "$PROJECT_DIR" diff --quiet HEAD -- intelligence/config.yaml &> /dev/null || rc=$?
+    [ "$rc" -eq 1 ]
+}
+
+# Eigene Einstellungen des Intelligence Layers: DATA_PATH/intelligence/config.yaml
+# (im Container /app/data/config.yaml). Neu: kommentierte Vorlage. Wurde
+# intelligence/config.yaml geändert, werden diese Änderungen übernommen,
+# solange die eigene Datei fehlt oder noch die unveränderte Vorlage ist.
+prepare_user_config() {
+    local target="$1" owner="$2"
+    local stub="$PROJECT_DIR/intelligence/config.stub.yaml"
+    local reference="$PROJECT_DIR/intelligence/config.yaml"
+    local untouched=false
+    [ -f "$stub" ] || return 0
+    if [ ! -e "$target" ] || [ "$(cat "$target")" = "$(cat "$stub")" ]; then
+        untouched=true
+    fi
+
+    if reference_config_modified; then
+        if [ "$untouched" = true ]; then
+            cp "$reference" "$target"
+            print_warning "Ihre Änderungen an intelligence/config.yaml wurden übernommen nach"
+            print_warning "  $target (bleibt bei Updates erhalten)."
+            print_warning "  Bitte dort nur die geänderten Einstellungen stehen lassen und die"
+            print_warning "  Referenz zurücksetzen, sonst blockiert sie 'git pull':"
+            print_warning "  git checkout -- intelligence/config.yaml"
+        else
+            print_warning "intelligence/config.yaml ist geändert, gilt aber nur noch in selbst gebauten"
+            print_warning "  Images: Änderungen bitte nach $target übernehmen und dann"
+            print_warning "  git checkout -- intelligence/config.yaml"
+            return 0
+        fi
+    elif [ ! -e "$target" ]; then
+        cp "$stub" "$target"
+        print_step "Vorlage für eigene Einstellungen: $target"
+    else
+        return 0
+    fi
+    # Nur für den Dienst lesbar: Die Datei darf Passwörter enthalten
+    chmod 600 "$target"
+    chown "$owner" "$target" 2>/dev/null || true
 }
 
 start_services() {

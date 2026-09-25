@@ -19,6 +19,7 @@
 {% endif %}
 <p class="status">
   {%- if last_success %}Stand {{ last_success | clock }}{% else %}Noch kein Clustering-Lauf abgeschlossen{% endif %}
+  {%- if last_error %} · <strong class="error">Fehler seit {{ last_error.at | clock }}: {{ last_error.message }}</strong>{% endif %}
   {%- if pages > 1 %} · Seite {{ page }} von {{ pages }}{% endif %}
   {{- ' ·' }} {{ total }} {{ 'Story' if total == 1 else 'Stories' -}}
   {%- if show_read %} · <a href="{{ read_toggle_url }}">Gelesene ausblenden</a>

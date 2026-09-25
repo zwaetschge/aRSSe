@@ -245,6 +245,40 @@ sed -i 's|^BASE_URL=.*|BASE_URL=https://news.example.com|' "$PROJ/.env"
 run_setup --no-start
 [ "$(env_value BASE_URL)" = "https://news.example.com" ] || fail "BASE_URL überschrieben"
 
+# Projekt mit intelligence/config.yaml und Vorlage als Git-Arbeitsverzeichnis
+new_git_project() {
+    new_project "$1"
+    mkdir -p "$PROJ/intelligence"
+    cp "$ROOT/intelligence/config.yaml" "$ROOT/intelligence/config.stub.yaml" "$PROJ/intelligence/"
+    git -C "$PROJ" init -q
+    git -C "$PROJ" add intelligence
+    git -C "$PROJ" -c user.name=test -c user.email=test@example.org commit -qm init
+}
+USER_CONFIG_PATH_REL="data/intelligence/config.yaml"
+
+step "Eigene Einstellungen: Vorlage in DATA_PATH/intelligence/config.yaml"
+new_git_project userconfig
+run_setup --no-start
+[ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS"
+cmp -s "$PROJ/intelligence/config.stub.yaml" "$PROJ/$USER_CONFIG_PATH_REL" \
+    || fail "Vorlage nicht angelegt"
+[ "$(stat -c %a "$PROJ/$USER_CONFIG_PATH_REL")" = 600 ] || fail "Vorlage hat nicht Rechte 600"
+echo "web: {min_sources: 4}" > "$PROJ/$USER_CONFIG_PATH_REL"
+run_setup --no-start
+grep -q "min_sources: 4" "$PROJ/$USER_CONFIG_PATH_REL" || fail "eigene Einstellungen überschrieben"
+
+step "Geänderte intelligence/config.yaml wird übernommen"
+new_git_project migrate
+sed -i 's/min_sources: 2/min_sources: 3/' "$PROJ/intelligence/config.yaml"
+run_setup --no-start
+[ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS"
+grep -q "min_sources: 3" "$PROJ/$USER_CONFIG_PATH_REL" 2>/dev/null || fail "Änderung nicht übernommen"
+grep -q "git checkout -- intelligence/config.yaml" <<< "$OUT" || fail "Hinweis auf git checkout fehlt"
+echo "web: {min_sources: 5}" > "$PROJ/$USER_CONFIG_PATH_REL"
+run_setup --no-start
+grep -q "min_sources: 5" "$PROJ/$USER_CONFIG_PATH_REL" || fail "eigene Einstellungen überschrieben"
+grep -q "gilt aber nur noch in selbst gebauten" <<< "$OUT" || fail "Hinweis auf doppelte Einstellungen fehlt"
+
 step "--yes startet Datenbank und Miniflux"
 new_project start
 run_setup --yes

@@ -10,6 +10,10 @@ all privileges before exec'ing the actual command.
 When the container already runs unprivileged (older compose files with
 ``user:``), the command is exec'ed unchanged.
 
+docker-compose.yml drops all capabilities except the ones this needs as
+root: CHOWN and DAC_OVERRIDE for the data directory, SETUID and SETGID for
+the switch. After the switch the process has none left.
+
 Written in Python because python:3.11-slim does not guarantee setpriv/gosu.
 """
 

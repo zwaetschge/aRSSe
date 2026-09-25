@@ -45,8 +45,11 @@ def test_untrusted_content_is_escaped(config, store):
 
 
 def test_healthz(config, store):
+    # Fresh start, no run yet: 'starting' keeps Docker from calling it unhealthy
     http = create_app(config, store).test_client()
-    assert http.get('/healthz').status_code == 503
+    response = http.get('/healthz')
+    assert response.status_code == 200
+    assert response.get_json()['status'] == 'starting'
 
     http = client_for(config, store)
     response = http.get('/healthz')

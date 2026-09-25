@@ -1,0 +1,35 @@
+# Security and bug-fix updates despite pinned versions. Every update is a
+# pull request and runs the full test suite, including the integration test.
+version: 2
+updates:
+  # intelligence/requirements.txt (pip-compile of requirements.in)
+  - package-ecosystem: pip
+    directory: /intelligence
+    schedule:
+      interval: weekly
+  # Base image of the intelligence layer (tag and digest)
+  - package-ecosystem: docker
+    directory: /intelligence
+    schedule:
+      interval: weekly
+    ignore:
+      # A new Python version needs a new requirements.txt
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+  # Miniflux and PostgreSQL in docker-compose.yml
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # A new major version cannot read the old data files: dump and
+      # restore by hand (README, "Backup und Updates")
+      - dependency-name: postgres
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

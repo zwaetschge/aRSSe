@@ -2,13 +2,16 @@
 Configuration module for aRSSe Intelligence Layer.
 
 Handles loading and validation of configuration from environment
-variables and YAML configuration file.
+variables and YAML configuration files.
 
-Precedence: defaults < config.yaml < environment variables.
-Empty environment variables are ignored, so docker-compose can pass
-variables through without clobbering values from config.yaml.
+Precedence: defaults < /app/config.yaml (baked into the image, reference
+only) < /app/data/config.yaml (optional user settings next to the story
+database) < environment variables. Each file only changes the settings it
+names. Empty environment variables are ignored, so docker-compose can pass
+variables through without clobbering values from the files.
 """
 
+import dataclasses
 import ipaddress
 import logging
 import os
@@ -21,6 +24,15 @@ from zoneinfo import ZoneInfo
 import yaml
 
 logger = logging.getLogger('arsse-intelligence')
+
+# Settings baked into the image: the documented reference, never edited
+DEFAULT_CONFIG_PATH = '/app/config.yaml'
+# Optional user settings next to the story database (in appdata backups,
+# untouched by image updates and 'git pull')
+USER_CONFIG_PATH = '/app/data/config.yaml'
+# Commented template copied to USER_CONFIG_PATH when it is missing
+USER_CONFIG_STUB = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                'config.stub.yaml')
 
 DUPLICATE_ACTIONS = ('none', 'mark_read')
 MARK_READ_SCOPES = ('visible', 'all')
@@ -60,6 +72,17 @@ DEFAULT_NOISE_TITLE_PATTERNS = [
     r'^Was jetzt\?',
     r'Briefing',
 ]
+
+# Example priorities for canonical_strategy 'source_priority' (others: 50)
+DEFAULT_SOURCE_SCORES = {
+    'sueddeutsche.de': 100,
+    'zeit.de': 95,
+    'spiegel.de': 90,
+    'faz.net': 90,
+    'tagesschau.de': 85,
+    'heise.de': 80,
+    'golem.de': 75,
+}
 
 # Sections (Rubriken) from URL path segments, for feeds in Miniflux's default
 # category: regular expression for one whole segment -> section name. The
@@ -114,7 +137,7 @@ class DeduplicationConfig:
     """Configuration for duplicate detection."""
     threshold: float = 0.85
     canonical_strategy: str = "longest"
-    source_scores: dict = field(default_factory=dict)
+    source_scores: dict = field(default_factory=lambda: dict(DEFAULT_SOURCE_SCORES))
     duplicate_action: str = "mark_read"
     # Articles from different feeds are only compared if both bodies (without
     # the title) have at least this many words: teasers like '[ mehr ]' say
@@ -218,14 +241,20 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
-def load_config(config_path: Optional[str] = None) -> Config:
+def load_config(config_path: Optional[str] = None,
+                user_config_path: Optional[str] = None) -> Config:
     """
-    Load configuration from YAML file and environment variables.
+    Load configuration from YAML files and environment variables.
 
-    Environment variables take precedence over YAML configuration.
+    The user file overrides the settings it names in config_path, and
+    environment variables override both. Missing files are skipped.
 
     Args:
-        config_path: Path to YAML configuration file.
+        config_path: Path to the YAML reference configuration.
+        user_config_path: Path to the optional YAML file with the user's
+            own settings. Given only in the service (layered mode): then a
+            config_path that differs from the defaults is reported, since
+            it was edited in place (see _warn_edited_reference).
 
     Returns:
         Config object with all settings.
@@ -235,17 +264,100 @@ def load_config(config_path: Optional[str] = None) -> Config:
     """
     config = Config()
 
-    if config_path and os.path.exists(config_path):
-        with open(config_path, 'r', encoding='utf-8') as f:
-            yaml_config = yaml.safe_load(f)
-
-        if yaml_config:
-            _apply_yaml_config(config, yaml_config)
+    base = _read_yaml(config_path)
+    if base:
+        _apply_yaml_config(config, base)
+        if user_config_path is not None:
+            _warn_edited_reference(config_path, config, user_config_path)
+    user = _read_yaml(user_config_path)
+    if user:
+        _apply_yaml_config(config, user)
+        logger.info("Using settings from %s", user_config_path)
 
     _apply_env_config(config)
     _validate(config)
 
     return config
+
+
+def _read_yaml(path: Optional[str]) -> Optional[dict]:
+    """Read one YAML configuration file; None if there is none."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            content = yaml.safe_load(f)
+    except OSError as e:
+        raise ConfigError(f"Cannot read {path}: {e.strerror}") from None
+    except yaml.YAMLError as e:
+        raise ConfigError(f"{path} is not valid YAML: {e}") from None
+    if content is not None and not isinstance(content, dict):
+        raise ConfigError(f"{path} must contain sections (clustering:, web:, ...), "
+                          f"got {type(content).__name__}")
+    return content
+
+
+def _flatten(obj, prefix: str = '') -> dict:
+    """Dotted setting name -> value for a (nested) configuration dataclass."""
+    values = {}
+    for f in dataclasses.fields(obj):
+        value = getattr(obj, f.name)
+        if dataclasses.is_dataclass(value):
+            values.update(_flatten(value, f'{prefix}{f.name}.'))
+        else:
+            values[prefix + f.name] = value
+    return values
+
+
+def changed_settings(config: Config) -> list:
+    """Names of the settings that differ from the defaults."""
+    defaults = _flatten(Config())
+    return [name for name, value in _flatten(config).items() if value != defaults[name]]
+
+
+def _warn_edited_reference(path: str, config: Config, user_config_path: str) -> None:
+    """
+    Point out settings changed in the reference file instead of the user file.
+
+    Before user files existed, the README said to edit
+    intelligence/config.yaml, which compose mounted (or the build copied)
+    to /app/config.yaml. Those settings still apply, but the published
+    image and the next 'git pull' drop them.
+    """
+    changed = changed_settings(config)
+    if changed:
+        logger.warning("%s differs from the shipped defaults (%s): it was edited before "
+                       "the image was built or is mounted from ./intelligence/config.yaml. "
+                       "These settings apply for now, but the published image and "
+                       "'git pull' do not keep them. Move them to %s (on the server: "
+                       "DATA_PATH/intelligence/config.yaml; README, 'Konfiguration').",
+                       path, ', '.join(changed), user_config_path)
+
+
+def ensure_user_config(path: str, stub_path: str = USER_CONFIG_STUB) -> bool:
+    """
+    Create the user configuration from the commented stub if it is missing.
+
+    Only inside an existing directory (the data volume); failures are
+    logged, the service runs without the file.
+
+    Returns:
+        True if the file was created.
+    """
+    if os.path.lexists(path) or not os.path.isdir(os.path.dirname(path) or '.'):
+        return False
+    try:
+        with open(stub_path, 'rb') as src:
+            stub = src.read()
+        # Only readable for the service: the file may hold a password
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as dst:
+            dst.write(stub)
+    except OSError as e:
+        logger.warning("Could not create %s: %s", path, e)
+        return False
+    logger.info("Created %s for your own settings", path)
+    return True
 
 
 def _apply_section(target, values: Optional[dict]) -> None:
@@ -358,15 +470,23 @@ def _apply_env_config(config: Config) -> None:
         config.deduplication.min_body_tokens = _env_number('DEDUP_MIN_BODY_TOKENS',
                                                            min_tokens, int)
 
-    # Scheduling
+    # Scheduling and storage
     if interval := _env('CLUSTERING_INTERVAL'):
         config.scheduling.interval_minutes = _env_number('CLUSTERING_INTERVAL', interval, int)
+    if lookback := _env('LOOKBACK_HOURS'):
+        config.scheduling.lookback_hours = _env_number('LOOKBACK_HOURS', lookback, int)
+    if retention := _env('RETENTION_DAYS'):
+        config.storage.retention_days = _env_number('RETENTION_DAYS', retention, int)
 
     # Web
     if port := _env('WEB_PORT'):
         config.web.port = _env_number('WEB_PORT', port, int)
     if page_size := _env('WEB_PAGE_SIZE'):
         config.web.page_size = _env_number('WEB_PAGE_SIZE', page_size, int)
+    if min_sources := _env('WEB_MIN_SOURCES'):
+        config.web.min_sources = _env_number('WEB_MIN_SOURCES', min_sources, int)
+    if max_stories := _env('WEB_MAX_STORIES'):
+        config.web.max_stories = _env_number('WEB_MAX_STORIES', max_stories, int)
     if hosts := _env('WEB_ALLOWED_HOSTS'):
         config.web.allowed_hosts = _split_list(hosts)
     auth = config.web.auth

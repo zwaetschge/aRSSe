@@ -305,6 +305,7 @@ def create_app(config: Config, store: StoryStore, client=None) -> Flask:
     base_path = urlsplit(public_url).path.rstrip('/') if loopback else ''
 
     client_lock = threading.Lock()
+    started = datetime.now(timezone.utc)
     auth = config.web.auth
     trusted_networks = [ipaddress.ip_network(n, strict=False) for n in auth.trusted_proxies]
     allowed_hosts = ({h.lower() for h in config.web.allowed_hosts} | set(LOOPBACK_HOSTS)
@@ -490,6 +491,7 @@ def create_app(config: Config, store: StoryStore, client=None) -> Flask:
             per_story=config.web.articles_per_story,
             related_max=RELATED_ON_FRONT_PAGE,
             last_success=store.get_meta('last_success'),
+            last_error=store.get_meta('last_error'),
         )
 
     @app.get('/story/<story_id>')
@@ -626,15 +628,31 @@ def create_app(config: Config, store: StoryStore, client=None) -> Flask:
 
     @app.get('/healthz')
     def healthz():
-        """Healthy while clustering runs succeed within 3 intervals."""
+        """
+        Healthy while clustering runs succeed within 3 intervals.
+
+        'ok' (200): a run succeeded within 3 intervals. 'starting' (200):
+        no run succeeded since the start, none failed, and the service runs
+        for less than 3 intervals. 'stale' (503): anything else; last_error
+        says why the last run failed.
+        """
+        now = datetime.now(timezone.utc)
         last_success = parse_date(store.get_meta('last_success'))
+        last_error = store.get_meta('last_error')
         limit = timedelta(minutes=config.scheduling.interval_minutes * 3)
-        healthy = last_success is not None and datetime.now(timezone.utc) - last_success < limit
+        if last_success is not None and now - last_success < limit:
+            status = 'ok'
+        elif (not last_error and (last_success is None or last_success < started)
+              and now - started < limit):
+            status = 'starting'
+        else:
+            status = 'stale'
         body = {
-            'status': 'ok' if healthy else 'stale',
+            'status': status,
             'last_success': last_success.isoformat() if last_success else None,
+            'last_error': last_error,
             'last_stats': store.get_meta('last_stats'),
         }
-        return jsonify(body), 200 if healthy else 503
+        return jsonify(body), 503 if status == 'stale' else 200
 
     return app

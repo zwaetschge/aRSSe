@@ -19,9 +19,11 @@ Miniflux (StatusSync), so read stories leave the front page within minutes.
 """
 
 import logging
+import logging.handlers
 import os
 import re
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -31,12 +33,14 @@ from typing import Callable, Optional
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlsplit, urlunsplit
 
 import miniflux
+import requests
 from bs4 import BeautifulSoup
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_distances, cosine_similarity
 
-from config import MAX_SECTION_CHARS, Config, load_config
+from config import (DEFAULT_CONFIG_PATH, MAX_SECTION_CHARS, USER_CONFIG_PATH, Config,
+                    ensure_user_config, load_config)
 from store import (MAX_TITLE_CHARS, ClusterResult, FetchResult, StoreTooNewError,
                    StoryStore, parse_date)
 
@@ -67,8 +71,13 @@ MAX_HTML_CHARS = 200_000
 # lookbehind anchors a match at the start of an unbroken run, so every run
 # is scanned once and the pattern stays linear on hostile input.
 _DATA_URI_RE = re.compile(r'(?<![^\s"\'<>()])data:[^\s"\'<>()]{250,}', re.IGNORECASE)
-# First retry delay after a failed cycle; doubles up to the normal interval
+# First retry delay after a failed cycle; doubles up to the normal interval,
+# but at most MAX_RETRY_SECONDS, so the service recovers soon after an outage
 MIN_RETRY_SECONDS = 10
+MAX_RETRY_SECONDS = 300
+# logging.file is rotated at this size, keeping LOG_FILE_BACKUPS old files
+LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
+LOG_FILE_BACKUPS = 3
 # Timeout of Miniflux requests: a clustering run pages through many entries,
 # the web interface ('Story gelesen') must not keep a page waiting long
 CLIENT_TIMEOUT = 60
@@ -84,6 +93,10 @@ DEFAULT_CATEGORIES = ('all', 'alle')
 _TOKEN_RE = re.compile(r'\b\w\w+\b')
 # Query parameters that only track the click, not select the article
 _TRACKING_PARAM_RE = re.compile(r'utm_.*|wt_mc', re.IGNORECASE)
+
+
+class MissingApiKeyError(ValueError):
+    """MINIFLUX_API_KEY is not configured."""
 
 
 class NewsClusterer:
@@ -213,9 +226,11 @@ class NewsClusterer:
                 stats['marked_read'] = self._mark_duplicates_read(entries, clusters)
 
             self.store.set_meta('last_success', datetime.now(timezone.utc).isoformat())
+            clear_error(self.store)
         except Exception as e:
             logger.exception("Error during clustering cycle: %s", e)
             stats['errors'] += 1
+            record_error(self.store, self.config, e)
 
         elapsed = time.time() - start_time
         stats['duration_seconds'] = round(elapsed, 2)
@@ -634,7 +649,7 @@ class NewsClusterer:
 def create_client(config: Config, timeout: int = CLIENT_TIMEOUT) -> miniflux.Client:
     """Create a Miniflux API client; each thread uses its own."""
     if not config.miniflux_api_key:
-        raise ValueError("MINIFLUX_API_KEY not set. Please configure the API key.")
+        raise MissingApiKeyError("MINIFLUX_API_KEY not set. Please configure the API key.")
     return miniflux.Client(config.miniflux_url, api_key=config.miniflux_api_key,
                            timeout=timeout)
 
@@ -780,6 +795,64 @@ def run_status_sync(config: Config, store: StoryStore, stop: threading.Event,
             logger.warning("Status sync with Miniflux failed, next try in %d s: %s", delay, e)
 
 
+def describe_error(error: BaseException, config: Config) -> tuple:
+    """
+    Kind and plain German reason of a failed clustering run.
+
+    Shown on the front page and in /healthz, which stays reachable without
+    login, so the message never contains details of the exception.
+
+    Returns:
+        (kind, message) with kind one of 'config', 'auth', 'connection',
+        'database' and 'internal'.
+    """
+    if isinstance(error, MissingApiKeyError):
+        return 'config', 'MINIFLUX_API_KEY fehlt'
+    if isinstance(error, miniflux.AccessUnauthorized):
+        return 'auth', 'Miniflux lehnt den API-Key ab'
+    if isinstance(error, (miniflux.ClientError, requests.RequestException,
+                          ConnectionError, TimeoutError)):
+        message = f'Miniflux unter {_without_userinfo(config.miniflux_url)} nicht erreichbar'
+        status = getattr(error, 'status_code', None)
+        return 'connection', f'{message} (HTTP {status})' if status else message
+    if isinstance(error, sqlite3.OperationalError):
+        return 'database', 'Datenbank nicht beschreibbar'
+    return 'internal', f'Clustering fehlgeschlagen ({type(error).__name__}, Details im Log)'
+
+
+def _without_userinfo(url: str) -> str:
+    """URL without user name and password."""
+    parts = urlsplit(url)
+    if '@' not in parts.netloc:
+        return url
+    return urlunsplit(parts._replace(netloc=parts.netloc.rsplit('@', 1)[1]))
+
+
+def record_error(store: StoryStore, config: Config, error: BaseException) -> None:
+    """
+    Store why the last clustering run failed (meta 'last_error').
+
+    'at' is when this error first occurred: it stays while the same error
+    repeats, so the front page can say 'Fehler seit 10:30'. Never raises.
+    """
+    kind, message = describe_error(error, config)
+    try:
+        previous = store.get_meta('last_error')
+        if isinstance(previous, dict) and previous.get('message') == message:
+            at = previous.get('at')
+        else:
+            at = datetime.now(timezone.utc).isoformat()
+        store.set_meta('last_error', {'at': at, 'kind': kind, 'message': message})
+    except Exception as e:  # e.g. the database itself is the problem
+        logger.error("Failed to store the error of the clustering run: %s", e)
+
+
+def clear_error(store: StoryStore) -> None:
+    """Forget the last error after a successful run."""
+    if store.get_meta('last_error') is not None:
+        store.set_meta('last_error', None)
+
+
 def check_api_key_user(client) -> bool:
     """
     Warn when MINIFLUX_API_KEY belongs to a Miniflux admin.
@@ -891,7 +964,9 @@ def setup_logging(config: Config) -> None:
 
     handlers = [logging.StreamHandler(sys.stdout)]
     if config.logging.file:
-        handlers.append(logging.FileHandler(config.logging.file, encoding='utf-8'))
+        handlers.append(logging.handlers.RotatingFileHandler(
+            config.logging.file, maxBytes=LOG_FILE_MAX_BYTES, backupCount=LOG_FILE_BACKUPS,
+            encoding='utf-8'))
 
     root = logging.getLogger()
     root.handlers.clear()
@@ -903,9 +978,16 @@ def setup_logging(config: Config) -> None:
 
 def run_scheduler(config: Config, store: StoryStore, stop: threading.Event,
                   make_clusterer: Callable[[], NewsClusterer]) -> None:
-    """Run clustering cycles until stopped; retry failures with backoff."""
+    """
+    Run clustering cycles until stopped; retry failures with backoff.
+
+    The retry delay doubles from MIN_RETRY_SECONDS up to the interval, but
+    at most MAX_RETRY_SECONDS. Errors outside a cycle (no API key) are
+    stored like those of a cycle (record_error).
+    """
     clusterer = None
     interval = config.scheduling.interval_minutes * 60
+    max_retry = min(interval, MAX_RETRY_SECONDS)
     retry_delay = MIN_RETRY_SECONDS
 
     while not stop.is_set():
@@ -914,13 +996,17 @@ def run_scheduler(config: Config, store: StoryStore, stop: threading.Event,
                 clusterer = make_clusterer()
             failed = clusterer.run_clustering_cycle()['errors'] > 0
         except Exception as e:
-            logger.exception("Clustering cycle crashed: %s", e)
+            if isinstance(e, MissingApiKeyError):
+                logger.error("%s", e)
+            else:
+                logger.exception("Clustering cycle crashed: %s", e)
+            record_error(store, config, e)
             failed = True
 
         if failed:
-            delay = min(retry_delay, interval)
+            delay = min(retry_delay, max_retry)
             logger.warning("Clustering failed, retrying in %ds", delay)
-            retry_delay = min(retry_delay * 2, interval)
+            retry_delay = min(retry_delay * 2, max_retry)
         else:
             delay = interval
             retry_delay = MIN_RETRY_SECONDS
@@ -930,8 +1016,10 @@ def run_scheduler(config: Config, store: StoryStore, stop: threading.Event,
 def main():
     """Main entry point: clustering scheduler plus Top Stories web server."""
     logging.basicConfig(level=logging.INFO)
+    user_config = os.getenv('ARSSE_USER_CONFIG', USER_CONFIG_PATH)
+    ensure_user_config(user_config)
     try:
-        config = load_config(os.getenv('ARSSE_CONFIG', '/app/config.yaml'))
+        config = load_config(os.getenv('ARSSE_CONFIG', DEFAULT_CONFIG_PATH), user_config)
     except Exception as e:
         logger.error("Failed to load configuration: %s", e)
         sys.exit(1)

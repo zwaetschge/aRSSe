@@ -16,9 +16,9 @@ Das System besteht aus fünf logischen Schichten:
 
 ## Voraussetzungen
 
-- Unraid 6.x oder höher
-- Docker und Docker Compose
-- Mindestens 4 GB verfügbarer RAM
+- Unraid 6.x oder höher (oder ein anderer Linux-Server, amd64 oder arm64)
+- Docker und Docker Compose – auf Unraid über das Plugin *Compose Manager*, oder ohne Compose über die Templates (siehe [Unraid ohne Compose](#unraid-ohne-compose))
+- Etwa 1 GB freier RAM für den ganzen Stack: Der Intelligence Layer braucht bei 2000 Artikeln pro Lauf gemessen rund 270 MB und ist auf 768 MB begrenzt
 - SSD-Cache empfohlen für PostgreSQL
 
 ## Schnellstart
@@ -49,6 +49,8 @@ Setzen Sie `BASE_URL` in `.env` auf die Adresse, unter der Ihre Geräte Miniflux
 ```bash
 docker compose up -d
 ```
+
+Den Intelligence Layer lädt Compose als fertiges Image (`ghcr.io/zwaetschge/arsse-intelligence`, für amd64 und arm64); gibt es das Image nicht, baut Compose es aus `./intelligence`. `docker compose up -d --build` baut immer den lokalen Code. Die Version wählt `ARSSE_VERSION` in `.env`: `latest` (Standard, die letzte Release-Version), eine feste Version wie `1.0` oder `edge` (jeder Stand des Hauptzweigs).
 
 Das Datenverzeichnis des Intelligence Layers (`${DATA_PATH}/intelligence`) muss nicht vorab angelegt werden: Der Container startet als root, übergibt es an `PUID:PGID` (Standard 1000:1000, Unraid 99:100) und läuft danach ohne Root-Rechte.
 
@@ -102,21 +104,27 @@ Die Miniflux-API kann keine Tags oder eigenen Metadaten schreiben – deshalb br
 | `/story/<id>/gelesen` | Knopf „Story gelesen (N)“ (Formular, `POST`): markiert die ungelesenen Artikel der Story im Zeitfenster in Miniflux als gelesen |
 | `/suche?q=…` | Suche in Titeln und Anrissen aller gespeicherten Stories (auch älterer, `storage.retention_days`), 2 bis 100 Zeichen; darunter ein Link zur Volltextsuche von Miniflux |
 | `/api/stories` | Dieselben Daten als JSON (alle Stories einzeln, ohne Seiten und Themen; `?rubrik=` und `?alle=1` wie oben) |
-| `/healthz` | `200`, solange der letzte erfolgreiche Lauf weniger als drei Intervalle zurückliegt (immer ohne Anmeldung) |
+| `/healthz` | Zustand als JSON (immer ohne Anmeldung): `ok` (`200`), solange der letzte erfolgreiche Lauf weniger als drei Intervalle zurückliegt; `starting` (`200`) nach dem Start, bis der erste Lauf gelingt, höchstens drei Intervalle lang und nur ohne Fehler; sonst `stale` (`503`). `last_error` nennt den Grund des letzten Fehlschlags, `last_stats` die Statistik des letzten Laufs |
 | `/static/…` | Manifest und Icons für den Startbildschirm (immer ohne Anmeldung, Icons holen Browser und Android teils ohne Zugangsdaten) |
 
 Die Seiten sind für E-Ink gebaut: kurze Seiten statt langem Scrollen, nur absolute Uhrzeiten („Stand 18:32“, „Mi 14:53“ – relative Angaben wie „vor 5 Min.“ stimmen auf einem stehenden Bildschirm bald nicht mehr), jede Quelle zuerst mit einem Artikel statt mehrerer aus demselben Feed, und Links, die als ganze Zeile mindestens 44 px hoch antippbar sind. Die Uhrzeiten gelten in der Zeitzone `TZ` aus `.env` (Standard Europe/Berlin) oder `web.timezone` in `config.yaml`.
 
 **Gelesen:** Eine Story, deren Artikel im Zeitfenster alle gelesen sind, verschwindet von der Startseite (die Statuszeile bietet „N gelesene zeigen“). „Story gelesen (N)“ markiert mit einem Tipp alle ungelesenen Artikel der Story in Miniflux als gelesen – statt neun fast gleicher Meldungen einzeln. Kommen danach neue Artikel hinzu, erscheint die Story wieder mit „N neu“. Was in Miniflux selbst gelesen wird, übernehmen die Top Stories alle 5 Minuten (`scheduling.status_sync_minutes`); auch eine so gelesene Story verschwindet und kommt mit neuen Artikeln zurück, dann aber ohne „N neu“ (aRSSe weiß nicht, ob Sie in Miniflux die ganze Story gelesen haben oder nur einen Artikel davon). Der Knopf braucht den `MINIFLUX_API_KEY`; ohne Anmeldung (`WEB_AUTH_MODE=none`) kann jeder, der den Port erreicht, Stories als gelesen markieren – fremde Webseiten können es nicht (siehe „Absicherung“).
 
+**Fehler:** Scheitert ein Lauf, nennt die Statuszeile der Startseite den Grund, z.B. „Fehler seit 10:30: Miniflux lehnt den API-Key ab“, „MINIFLUX_API_KEY fehlt“, „Miniflux unter http://miniflux:8080 nicht erreichbar“ oder „Datenbank nicht beschreibbar“. Der Dienst versucht es nach 10 Sekunden erneut, danach mit doppeltem Abstand, höchstens alle 5 Minuten; der erste erfolgreiche Lauf entfernt die Meldung. Die Einzelheiten stehen im Log (`docker logs arsse-intelligence`).
+
 **Rubriken:** Politik, Sport, Technik, Regional usw. kommen aus der Kategorie des Feeds in Miniflux. Für Feeds in der Standardkategorie „All“ entscheidet der Pfad der Artikel-URL (`tagesschau.de/ausland/…` → Politik, `…/sport/…` → Sport; `web.path_sections` in `config.yaml`); eine Story gehört zur Rubrik der meisten ihrer Artikel.
 
 Links führen in Miniflux (`BASE_URL`), damit Gelesen-Status und Volltext erhalten bleiben. Zeigt `BASE_URL` auf `localhost`, verwenden die Links stattdessen die Adresse, unter der die Top Stories aufgerufen wurden, mit `MINIFLUX_PORT` (beim Start erscheint dazu eine Warnung im Log).
 
-**Konfiguration:**
+#### Konfiguration
+
+Eigene Einstellungen gehören in `${DATA_PATH}/intelligence/config.yaml` (im Container `/app/data/config.yaml`, Unraid: `/mnt/user/appdata/arsse/intelligence/config.yaml`). Die Datei liegt neben der Story-Datenbank, bleibt bei Updates des Images und bei `git pull` erhalten und ist in Backups enthalten; `scripts/setup.sh` bzw. der erste Start legen sie mit auskommentierten Beispielen an. Tragen Sie dort nur ein, was vom Standard abweichen soll, und starten Sie danach neu (`docker compose restart intelligence`). Alle Einstellungen mit Erklärung stehen in [`intelligence/config.yaml`](intelligence/config.yaml) – diese Datei ist die Referenz im Image und wird nicht geändert.
+
+Reihenfolge: Standardwerte < `intelligence/config.yaml` (im Image) < `${DATA_PATH}/intelligence/config.yaml` < Umgebungsvariablen (`.env` bzw. Unraid-Template). Abschnitte werden zusammengeführt: Es gilt jede Einstellung, die in Ihrer Datei steht, alle anderen behalten ihren Standard; Listen und Tabellen (z.B. `source_scores`, `exclude_patterns`) ersetzen den Standard ganz. Ein Beispiel mit allen Abschnitten:
 
 ```yaml
-# intelligence/config.yaml
+# ${DATA_PATH}/intelligence/config.yaml
 clustering:
   threshold: 0.75                # max. durchschnittliche Kosinus-Distanz einer Story
   min_pair_similarity: 0.30      # Mindest-Ähnlichkeit einer Story aus nur zwei Artikeln
@@ -141,7 +149,26 @@ web:
   exclude_patterns: ['^Wetter\b']  # Stories nur aus solchen Titeln nicht anzeigen
 ```
 
-Umgebungsvariablen aus `.env` (z.B. `CLUSTERING_THRESHOLD`) überschreiben `config.yaml`; auskommentierte bzw. leere Variablen tun das nicht.
+Umgebungsvariablen aus `.env` (z.B. `CLUSTERING_THRESHOLD`) überschreiben beide Dateien; auskommentierte bzw. leere Variablen tun das nicht. Für das Unraid-Template gibt es zusätzlich `LOOKBACK_HOURS`, `RETENTION_DAYS`, `WEB_MIN_SOURCES` und `WEB_MAX_STORIES`.
+
+**Früher geänderte `intelligence/config.yaml`:** Ältere Versionen dieses README empfahlen, die Datei im Repository zu ändern. Das blockiert `git pull`, und das veröffentlichte Image kennt die Änderungen nicht. Übernehmen Sie sie vor dem Update:
+
+```bash
+cp intelligence/config.yaml ${DATA_PATH}/intelligence/config.yaml   # DATA_PATH aus .env
+git checkout -- intelligence/config.yaml
+git pull
+```
+
+Danach in der neuen Datei nur die geänderten Einstellungen stehen lassen, dann gelten künftige Verbesserungen der Standardwerte auch für Sie. `scripts/setup.sh` übernimmt eine geänderte `intelligence/config.yaml` automatisch, solange die eigene Datei fehlt oder noch die unveränderte Vorlage ist. Solange ein selbst gebautes Image eine geänderte Referenz enthält (oder eine ältere `docker-compose.yml` sie einbindet), gelten die Änderungen weiter; das Log nennt dann beim Start die betroffenen Einstellungen.
+
+Anpassungen an `docker-compose.yml` selbst (Ports, Speicherlimit, zusätzliche Mounts) gehören in eine `docker-compose.override.yml` daneben: Compose liest sie automatisch, und `git pull` lässt sie in Ruhe. Beispiel:
+
+```yaml
+# docker-compose.override.yml
+services:
+  intelligence:
+    mem_limit: 1g
+```
 
 **Schwelle kalibrieren:** Der Standardwert 0.75 ist an ~500 echten Artikeln aus 13 deutschen Nachrichtenfeeds gemessen (Kurztexte aus RSS, kein Volltext). Mit anderen Feeds oder aktiviertem Volltext-Crawler lohnt ein Vergleich – das Werkzeug liest nur und schreibt nichts:
 
@@ -176,8 +203,10 @@ aRSSe/
 ├── docker-compose.yml      # Haupt-Stack-Definition
 ├── .env.example            # Umgebungsvariablen-Vorlage
 ├── intelligence/
-│   ├── Dockerfile          # Python-Container
-│   ├── requirements.txt    # Python-Abhängigkeiten
+│   ├── Dockerfile          # Python-Container (Basis-Image per Digest festgelegt)
+│   ├── requirements.in     # Python-Abhängigkeiten (Versionsbereiche)
+│   ├── requirements.txt    # daraus erzeugt: feste Versionen mit Hashes (pip-compile, nicht von Hand ändern)
+│   ├── fetch_nltk_data.py  # Stopwörter aus festem nltk_data-Stand, mit Prüfsumme
 │   ├── entrypoint.py       # Container-Start: Datenrechte setzen, Root-Rechte abgeben
 │   ├── news_clustering.py  # Clustering-Logik und Einstiegspunkt
 │   ├── evaluate.py         # Clustering-Schwelle an eigenen Feeds kalibrieren und messen
@@ -187,18 +216,24 @@ aRSSe/
 │   ├── templates/          # HTML-Templates
 │   ├── static/             # Manifest und Icons für den Startbildschirm
 │   ├── config.py           # Konfigurationsmodul
-│   ├── config.yaml         # Service-Konfiguration
+│   ├── config.yaml         # Referenz aller Einstellungen (im Image, nicht ändern)
+│   ├── config.stub.yaml    # Vorlage für DATA_PATH/intelligence/config.yaml
 │   └── tests/              # pytest-Suite
 ├── css/
 │   ├── eink-theme.css      # E-Ink-Theme für Miniflux
 │   └── color-theme.css     # Farb-Theme für Miniflux
 ├── unraid/
-│   └── miniflux.xml        # Unraid CA Template
+│   ├── miniflux.xml        # Unraid-Template für Miniflux
+│   └── arsse-intelligence.xml # Unraid-Template für den Intelligence Layer
 ├── scripts/
 │   ├── setup.sh            # Initialisierungsskript
+│   ├── backup.sh           # Backup von Datenbanken, Abos und .env
 │   ├── make-icons.py       # Erzeugt die Icons in intelligence/static
+│   ├── check-unraid-templates.py # Vergleicht die Templates mit docker-compose.yml
 │   ├── test-setup.sh       # Test für setup.sh (ohne Docker)
+│   ├── test-backup.sh      # Test für backup.sh (ohne Docker)
 │   └── integration-test.sh # Stack-Test gegen echtes Miniflux
+├── .github/                # CI (Tests), Release des Images, Dependabot
 └── tests/integration/      # Feeds und Compose-Override für den Stack-Test
 ```
 
@@ -369,18 +404,113 @@ WEB_ALLOWED_HOSTS=stories.example.com
 - **Metriken:** `/metrics` von Miniflux ist standardmäßig aus (`METRICS_COLLECTOR=0`). Wer es für Prometheus einschaltet, setzt zusätzlich `METRICS_USERNAME` und `METRICS_PASSWORD` – über den Proxy kommen alle Anfragen aus einem 172er-Netz, `METRICS_ALLOWED_NETWORKS` allein schützt dann nicht.
 - **Zwei Faktoren:** z.B. Authelia oder Authentik am Reverse Proxy; die Top Stories übernehmen den dort angemeldeten Benutzer mit `WEB_AUTH_MODE=proxy`.
 
+### Container
+
+`docker-compose.yml` beschränkt die Container auf das Nötige:
+
+- **Intelligence Layer:** schreibgeschütztes Dateisystem (beschreibbar sind nur `/app/data` und `/tmp` im Speicher), keine Linux-Berechtigungen außer denen, die der Start als root braucht, um das Datenverzeichnis an `PUID:PGID` zu übergeben (`CHOWN`, `DAC_OVERRIDE`, `SETUID`, `SETGID`); danach läuft der Dienst ohne jede Berechtigung und kann seinen eigenen Code nicht ändern. Dazu `no-new-privileges` und Grenzen für Speicher (768 MB), CPU (1 Kern) und Prozesse (128).
+- **Miniflux:** schreibgeschützt, ohne Berechtigungen, `no-new-privileges`.
+- **PostgreSQL:** `no-new-privileges` (der Start braucht root, um die Rechte des Datenverzeichnisses zu setzen).
+- **Logs:** Docker behält je Container höchstens 3 × 10 MB (`x-logging`); `logging.file` in `config.yaml` rotiert bei 5 MB (drei ältere Dateien).
+
+Grenzen ändern Sie in einer `docker-compose.override.yml` (siehe [Konfiguration](#konfiguration)). Die Unraid-Templates setzen dieselben Einschränkungen unter *Extra Parameters*.
+
+## Unraid ohne Compose
+
+Ohne das Compose-Manager-Plugin laufen die drei Container auch über die Docker-Seite von Unraid. Die Templates liegen in `unraid/`; der Intelligence Layer kommt als fertiges Image aus der GitHub Container Registry.
+
+1. **Netzwerk anlegen** (einmalig, im Unraid-Terminal): `docker network create arsse`. Im Standardnetzwerk `bridge` finden sich Container nicht über ihre Namen.
+2. **Templates holen:**
+   ```bash
+   cd /boot/config/plugins/dockerMan/templates-user
+   wget -O my-arsse-miniflux.xml https://raw.githubusercontent.com/zwaetschge/aRSSe/HEAD/unraid/miniflux.xml
+   wget -O my-arsse-intelligence.xml https://raw.githubusercontent.com/zwaetschge/aRSSe/HEAD/unraid/arsse-intelligence.xml
+   ```
+3. **PostgreSQL:** *Docker > Add Container* ohne Template: Name `arsse-db`, Repository `postgres:15-alpine`, Network Type `Custom: arsse`, Variablen `POSTGRES_USER=miniflux`, `POSTGRES_PASSWORD=<Passwort>`, `POSTGRES_DB=miniflux`, Pfad `/var/lib/postgresql/data` → `/mnt/user/appdata/arsse/postgresql` (besser auf dem Cache, z.B. `/mnt/cache/appdata/…`), Extra Parameters `--security-opt=no-new-privileges:true`.
+4. **Miniflux:** *Add Container*, Template `arsse-miniflux`. In `DATABASE_URL` `CHANGE_ME` durch das Postgres-Passwort ersetzen, `ADMIN_PASSWORD` und `BASE_URL` (z.B. `http://192.168.1.10:8080`) eintragen.
+5. **API-Key:** In Miniflux einen Benutzer ohne Admin-Rechte anlegen, als dieser Feeds abonnieren und unter *Einstellungen > API-Schlüssel* einen Key erzeugen (siehe [Eigener Miniflux-Benutzer](#eigener-miniflux-benutzer-für-die-top-stories)).
+6. **Intelligence Layer:** *Add Container*, Template `arsse-intelligence`: `MINIFLUX_API_KEY`, `MINIFLUX_PUBLIC_URL` (wie `BASE_URL`) eintragen; `PUID` 99 und `PGID` 100 passen für Unraid. Die Top Stories erscheinen unter `http://<unraid-ip>:8081`, eigene Einstellungen stehen in `/mnt/user/appdata/arsse/intelligence/config.yaml`. Die weiteren Variablen (Zugriffsschutz, Zeitfenster, Mindestzahl der Quellen …) zeigt *Show more settings*.
+
+Updates holt Unraid wie bei anderen Containern (*Check for Updates*). Für Backups hält das Plugin *Appdata Backup* die Container an und sichert `/mnt/user/appdata/arsse` samt Datenbanken und `config.yaml` in einem konsistenten Zustand.
+
+## Backup und Updates
+
+### Backup
+
+`scripts/backup.sh` sichert den laufenden Stack, ohne ihn anzuhalten, nach `${DATA_PATH}/backups/<Datum_Uhrzeit>/` (anderes Ziel: `BACKUP_DIR` in `.env` oder als Argument):
+
+| Datei | Inhalt |
+|-------|--------|
+| `miniflux.dump` | Miniflux-Datenbank (`pg_dump -Fc`: Benutzer, Feeds, Artikel, Lesestatus) |
+| `feeds.opml` | Abonnements des Benutzers von `MINIFLUX_API_KEY`, für jeden Feedreader |
+| `arsse.db` | Story-Datenbank (SQLite-Online-Backup, konsistent auch während eines Laufs) |
+| `config.yaml` | Eigene Einstellungen des Intelligence Layers (falls vorhanden) |
+| `env` | Kopie der `.env` mit allen Passwörtern (Rechte 600) |
+
+Sicherungen, die älter als `BACKUP_KEEP_DAYS` Tage sind (Standard 14), löscht das Skript danach. Die Sicherungen enthalten Passwörter – legen Sie eine Kopie auf ein anderes Laufwerk. Auf Unraid planen Sie das Skript mit dem Plugin *User Scripts*, z.B. täglich:
+
+```bash
+#!/bin/bash
+/mnt/user/appdata/aRSSe/scripts/backup.sh   # Pfad Ihres Repositorys
+```
+
+Liegt die Compose-Datei nicht im Repository (z.B. im Compose Manager), nennen Sie sie mit `COMPOSE_FILE=/pfad/docker-compose.yml`, die `.env` mit `ENV_FILE=/pfad/.env` und den Projektnamen mit `COMPOSE_PROJECT_NAME=…`.
+
+**Wiederherstellen** (mit dem Verzeichnis einer Sicherung als `B`):
+
+```bash
+cp "$B/env" .env                    # nur falls .env verloren ist
+docker compose stop miniflux intelligence
+docker compose exec -T db pg_restore -U miniflux -d miniflux --clean --if-exists < "$B/miniflux.dump"
+# Story-Datenbank (optional: ohne sie baut der nächste Lauf die Stories neu auf)
+rm -f ${DATA_PATH}/intelligence/arsse.db-wal ${DATA_PATH}/intelligence/arsse.db-shm
+cp "$B/arsse.db" ${DATA_PATH}/intelligence/arsse.db
+cp "$B/config.yaml" ${DATA_PATH}/intelligence/config.yaml
+docker compose up -d
+```
+
+Auf einem neuen Server zuerst nur die Datenbank starten (`docker compose up -d --wait db`), dann `pg_restore` ohne `--clean` und erst danach `docker compose up -d` – sonst legt Miniflux schon leere Tabellen an. Die Rechte der kopierten Dateien setzt der Intelligence-Container beim Start selbst.
+
+### Updates
+
+```bash
+scripts/backup.sh      # Miniflux migriert seine Datenbank nur vorwärts
+git pull               # docker-compose.yml, Skripte, Templates
+docker compose pull    # neue Images (Miniflux, Intelligence Layer)
+docker compose up -d
+```
+
+Solange es noch keine Release-Version gibt, meldet `docker compose pull` das Intelligence-Image als nicht gefunden; dann `docker compose up -d --build`. Wer `intelligence/config.yaml` früher selbst geändert hat, liest vorher [Konfiguration](#konfiguration).
+
+### PostgreSQL-Hauptversion wechseln
+
+Eine neue Hauptversion (z.B. 15 → 17) startet nicht mit den Datendateien der alten; einfach das Image zu ändern lässt die Datenbank in einer Neustart-Schleife hängen. Der Weg führt über Dump und Restore:
+
+```bash
+scripts/backup.sh                  # B = das neue Verzeichnis unter ${DATA_PATH}/backups
+docker compose stop miniflux intelligence db
+mv ${DATA_PATH}/postgresql ${DATA_PATH}/postgresql-15.bak
+# in .env: POSTGRES_MAJOR=17
+#   ab 18 zusätzlich POSTGRES_MOUNT=/var/lib/postgresql (neue Verzeichnisstruktur)
+docker compose up -d --wait db
+docker compose exec -T db pg_restore -U miniflux -d miniflux < "$B/miniflux.dump"
+docker compose up -d
+```
+
+Läuft alles, kann `postgresql-15.bak` weg. Zurück geht es, indem Sie das alte Verzeichnis zurückbenennen und `POSTGRES_MAJOR` wieder auf 15 setzen. Dependabot schlägt Hauptversionen von PostgreSQL deshalb nicht vor.
+
 ## Troubleshooting
 
 ### Clustering funktioniert nicht
 
-1. Prüfen Sie den Status: `curl http://<unraid-ip>:8081/healthz` (enthält die Statistik des letzten Laufs)
+1. Prüfen Sie die Statuszeile der Startseite („Fehler seit …“) oder `curl http://<unraid-ip>:8081/healthz` (`last_error`: Grund des letzten Fehlschlags, `last_stats`: Statistik des letzten Laufs)
 2. Prüfen Sie die Logs: `docker logs arsse-intelligence`
 3. Stories entstehen erst, wenn mehrere Feeds über dasselbe Thema berichten – abonnieren Sie mehrere überlappende Quellen
 4. Zu wenige oder zu große Stories: `threshold` mit `evaluate.py` kalibrieren (höher = größere, aber unschärfere Stories); zu viele zufällige Zweier-Stories: `min_pair_similarity` erhöhen
 5. `Cannot open story database`: Der Container konnte `${DATA_PATH}/intelligence` nicht an `PUID:PGID` übergeben (z.B. NFS-Freigabe mit `root_squash`, oder eine ältere `docker-compose.yml` mit `user:`) – dann `chown PUID:PGID` auf das Verzeichnis selbst ausführen
 6. Alle Links der Top Stories zeigen auf `localhost` oder die falsche Adresse: `BASE_URL` in `.env` setzen und `docker compose up -d` ausführen
 7. `Datenbank stammt von neuerer aRSSe-Version`: Das Image ist älter als die Datenbank (z.B. nach einem Rückschritt auf eine ältere Version). Entweder wieder die neuere Version starten, ein Backup von `arsse.db` aus der Zeit vor dem Update einspielen oder `${DATA_PATH}/intelligence/arsse.db*` löschen – die Datenbank ist nur ein Zwischenspeicher und wird beim nächsten Lauf aus Miniflux neu aufgebaut. Dabei ändern sich die Story-IDs, und aRSSe vergisst, welche Duplikate es schon als gelesen markiert hat: Duplikate im aktuellen Zeitfenster, die Sie wieder auf ungelesen gesetzt haben, werden einmal erneut als gelesen markiert
-8. Der Container startet nicht und das Log nennt eine Einstellung (z.B. `scheduling.batch_size must be between 1 and 1000`): den Wert in `config.yaml` bzw. `.env` korrigieren
+8. Der Container startet nicht und das Log nennt eine Einstellung (z.B. `scheduling.batch_size must be between 1 and 1000`): den Wert in `${DATA_PATH}/intelligence/config.yaml` bzw. `.env` korrigieren
 9. Top Stories antworten mit `400`: Der aufgerufene Hostname fehlt in `WEB_ALLOWED_HOSTS`. Mit `403` bei `WEB_AUTH_MODE=proxy`: Die Anfrage kam nicht von einer Adresse in `WEB_TRUSTED_PROXIES` oder ohne Benutzer-Header – das Log nennt die Adresse
 
 ### E-Ink-Darstellung fehlerhaft
@@ -400,10 +530,21 @@ WEB_ALLOWED_HOSTS=stories.example.com
 ```bash
 cd intelligence
 python -m venv .venv && . .venv/bin/activate
+pip install --require-hashes -r requirements.txt   # dieselben Versionen wie im Image
 pip install -r requirements-dev.txt
-python -c "import nltk; nltk.download('stopwords')"
+python fetch_nltk_data.py
 pytest
 ```
+
+Abhängigkeiten ändern: `requirements.in` anpassen und `requirements.txt` neu erzeugen (nicht von Hand ändern; Dependabot aktualisiert beide Dateien) (Python 3.11, alle Pakete müssen als Wheel für amd64 und arm64 vorliegen):
+
+```bash
+pip-compile --generate-hashes --output-file=requirements.txt requirements.in
+```
+
+Dependabot schlägt wöchentlich Updates für Python-Pakete, Basis-Image, Miniflux und die GitHub Actions vor; jeder Vorschlag durchläuft alle Tests. Neue PostgreSQL-Hauptversionen schlägt er nicht vor (siehe [Backup und Updates](#backup-und-updates)).
+
+**Release:** Jeder Push auf den Hauptzweig veröffentlicht nach bestandenen Tests `ghcr.io/zwaetschge/arsse-intelligence:edge` und `:sha-<commit>`, ein Tag `vX.Y.Z` zusätzlich `:X.Y.Z`, `:X.Y` und `:latest` (`.github/workflows/release.yml`, amd64 und arm64). Pull Requests veröffentlichen nie etwas.
 
 Integrationstest mit echtem Miniflux (braucht Docker, kollidiert nicht mit einem laufenden Stack):
 
@@ -413,7 +554,7 @@ scripts/integration-test.sh
 IT_PUID=99 IT_PGID=100 IT_PRECREATE_DATA=0 scripts/integration-test.sh
 ```
 
-`scripts/test-setup.sh` prüft `setup.sh` mit einem Docker-Stub (ohne Docker).
+`scripts/test-setup.sh` prüft `setup.sh`, `scripts/test-backup.sh` prüft `backup.sh` mit einem Docker-Stub (ohne Docker; `PYTHON=` wählt das Python mit den Abhängigkeiten). `scripts/check-unraid-templates.py` vergleicht die Unraid-Templates mit `docker-compose.yml` (braucht nur die Docker-CLI).
 
 ## Lizenz
 

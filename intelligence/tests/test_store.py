@@ -268,7 +268,8 @@ def test_service_refuses_to_start_on_newer_database(config, monkeypatch, caplog)
     conn = sqlite3.connect(config.storage.db_path)
     conn.execute("PRAGMA user_version = 99")
     conn.close()
-    monkeypatch.setattr(news_clustering, 'load_config', lambda path: config)
+    monkeypatch.setattr(news_clustering, 'load_config', lambda *paths: config)
+    monkeypatch.setattr(news_clustering, 'ensure_user_config', lambda path: False)
     monkeypatch.setattr(news_clustering, 'setup_logging', lambda cfg: None)
 
     with caplog.at_level('ERROR', logger='arsse-intelligence'):

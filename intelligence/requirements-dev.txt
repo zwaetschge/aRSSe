@@ -1,2 +1,9 @@
--r requirements.txt
+# Development: tests and the lock file tool. The service itself installs
+# requirements.txt (pinned with hashes, see Dockerfile); CI installs the
+# lock first, so the ranges in requirements.in change nothing there.
+#
+# Update the lock after changing requirements.in:
+#   pip-compile --generate-hashes --output-file=requirements.txt requirements.in
+-r requirements.in
 pytest>=8,<9
+pip-tools>=7.4,<8

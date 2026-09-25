@@ -28,7 +28,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
-from config import load_config
+from config import USER_CONFIG_PATH, load_config
 from news_clustering import NewsClusterer, setup_logging
 
 DEFAULT_THRESHOLDS = [0.65, 0.7, 0.75, 0.8]
@@ -175,6 +175,10 @@ def main():
     parser.add_argument('--config', default=os.getenv('ARSSE_CONFIG', '/app/config.yaml'),
                         help='config.yaml (default: $ARSSE_CONFIG, /app/config.yaml or '
                              'the one next to this script)')
+    parser.add_argument('--user-config',
+                        default=os.getenv('ARSSE_USER_CONFIG', USER_CONFIG_PATH),
+                        help='own settings on top of --config (default: $ARSSE_USER_CONFIG '
+                             f'or {USER_CONFIG_PATH}; skipped if missing)')
     parser.add_argument('--corpus', help='saved articles (eval/export_corpus.py) instead '
                                          'of Miniflux')
     parser.add_argument('--gold', help='gold labels (eval/gold.json); needs --corpus')
@@ -193,7 +197,7 @@ def main():
     config_path = args.config
     if not os.path.exists(config_path):
         config_path = str(Path(__file__).resolve().parent / 'config.yaml')
-    config = load_config(config_path)
+    config = load_config(config_path, args.user_config)
     if args.ngram_max is not None:
         config.clustering.ngram_max = args.ngram_max
     if args.min_pair_similarity is not None:

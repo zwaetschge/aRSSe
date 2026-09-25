@@ -1,3 +1,14 @@
+# Eigene Anpassungen (Ports, Limits, zusätzliche Mounts) gehören in eine
+# docker-compose.override.yml neben dieser Datei: Compose liest sie
+# automatisch, und 'git pull' lässt sie in Ruhe (README, "Konfiguration").
+
+# Container-Logs begrenzen (Docker behält sonst alles): 3 x 10 MB je Dienst
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   # ============================================
   # Miniflux - RSS Aggregator (Ingestion Layer)
@@ -5,6 +16,13 @@ services:
   miniflux:
     image: miniflux/miniflux:2.3.3
     container_name: arsse-miniflux
+    logging: *default-logging
+    # Miniflux schreibt nur in die Datenbank und braucht keine Rechte
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "${MINIFLUX_PORT:-8080}:8080"
     environment:
@@ -64,14 +82,22 @@ services:
   # PostgreSQL - Datenspeicher (Storage Layer)
   # ============================================
   db:
-    image: postgres:15-alpine
+    # Hauptversion nur mit Dump und Restore wechseln (README, "Backup und
+    # Updates"): Die Datendateien einer anderen Version startet Postgres nicht
+    image: postgres:${POSTGRES_MAJOR:-15}-alpine
     container_name: arsse-db
+    logging: *default-logging
+    # Der Entrypoint von Postgres braucht root, um die Rechte seines
+    # Datenverzeichnisses zu setzen; neue Rechte gibt es trotzdem keine
+    security_opt:
+      - no-new-privileges:true
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-miniflux}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=miniflux
     volumes:
-      - ${DATA_PATH:-./data}/postgresql:/var/lib/postgresql/data
+      # Ab Postgres 18: POSTGRES_MOUNT=/var/lib/postgresql
+      - ${DATA_PATH:-./data}/postgresql:${POSTGRES_MOUNT:-/var/lib/postgresql/data}
     networks:
       - arsse-network
     restart: unless-stopped
@@ -86,10 +112,36 @@ services:
   # Intelligence Layer - Python Clustering Bot
   # ============================================
   intelligence:
+    # Veröffentlichtes Image (amd64 und arm64): 'docker compose pull'
+    # aktualisiert es. Gibt es das Image (noch) nicht, baut Compose es aus
+    # ./intelligence; 'docker compose up -d --build' baut immer den lokalen Code.
+    image: ghcr.io/zwaetschge/arsse-intelligence:${ARSSE_VERSION:-latest}
     build:
       context: ./intelligence
       dockerfile: Dockerfile
     container_name: arsse-intelligence
+    logging: *default-logging
+    # Gemessen: ~270 MB bei 2000 Artikeln (scheduling.max_entries);
+    # anpassen per docker-compose.override.yml
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 128
+    # Nur /app/data (und /tmp im Speicher) ist beschreibbar. Der Entrypoint
+    # braucht als root CHOWN und DAC_OVERRIDE, um das Datenverzeichnis an
+    # PUID:PGID zu übergeben, und SETUID/SETGID, um danach als PUID:PGID
+    # zu laufen; dabei fallen alle Berechtigungen weg.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
     ports:
       # Nur lokal erreichbar (hinter einem Reverse Proxy):
       # INTELLIGENCE_PORT=127.0.0.1:8081
@@ -102,8 +154,10 @@ services:
       - MINIFLUX_PUBLIC_URL=${BASE_URL:-}
       # Für Links, falls BASE_URL auf localhost zeigt
       - MINIFLUX_PORT=${MINIFLUX_PORT:-8080}
-      # Leer = Wert aus intelligence/config.yaml
+      # Leer = Wert aus DATA_PATH/intelligence/config.yaml bzw. dem Standard
       - CLUSTERING_INTERVAL=${CLUSTERING_INTERVAL:-}
+      - LOOKBACK_HOURS=${LOOKBACK_HOURS:-}
+      - RETENTION_DAYS=${RETENTION_DAYS:-}
       - CLUSTERING_THRESHOLD=${CLUSTERING_THRESHOLD:-}
       - CLUSTERING_MIN_PAIR_SIMILARITY=${CLUSTERING_MIN_PAIR_SIMILARITY:-}
       - CLUSTERING_NGRAM_MAX=${CLUSTERING_NGRAM_MAX:-}
@@ -112,7 +166,7 @@ services:
       - DEDUP_ACTION=${DEDUP_ACTION:-}
       - DEDUP_MIN_BODY_TOKENS=${DEDUP_MIN_BODY_TOKENS:-}
       - LOG_LEVEL=${LOG_LEVEL:-}
-      # Zugriffsschutz der Top Stories (leer = config.yaml, dort "none")
+      # Zugriffsschutz der Top Stories (leer = config.yaml, Standard "none")
       - WEB_AUTH_MODE=${WEB_AUTH_MODE:-}
       - WEB_USERNAME=${WEB_USERNAME:-}
       - WEB_PASSWORD=${WEB_PASSWORD:-}
@@ -121,14 +175,17 @@ services:
       - WEB_TRUSTED_PROXIES=${WEB_TRUSTED_PROXIES:-}
       - WEB_ALLOWED_HOSTS=${WEB_ALLOWED_HOSTS:-}
       - WEB_PAGE_SIZE=${WEB_PAGE_SIZE:-}
+      - WEB_MIN_SOURCES=${WEB_MIN_SOURCES:-}
+      - WEB_MAX_STORIES=${WEB_MAX_STORIES:-}
       - TZ=${TZ:-Europe/Berlin}
       # Der Container startet als root, übergibt ${DATA_PATH}/intelligence an
       # PUID:PGID (Unraid: 99:100) und läuft danach ohne Root-Rechte
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
     volumes:
+      # Story-Datenbank und eigene Einstellungen (config.yaml, beim ersten
+      # Start angelegt); die Referenz /app/config.yaml steckt im Image
       - ${DATA_PATH:-./data}/intelligence:/app/data
-      - ./intelligence/config.yaml:/app/config.yaml:ro
     depends_on:
       miniflux:
         condition: service_healthy

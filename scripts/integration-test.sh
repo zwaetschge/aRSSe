@@ -7,8 +7,10 @@
 # entstehen, Duplikate in Miniflux als gelesen markiert werden, die
 # Startseite absolute Uhrzeiten und die Dateien für den Startbildschirm
 # liefert und die Absicherung greift (Passwortschutz, Sicherheits-Header,
-# /metrics aus, fremde Host-Header). Kollidiert nicht mit einem
-# laufenden Produktions-Stack (eigene Namen, Ports und Datenverzeichnisse).
+# /metrics aus, fremde Host-Header, schreibgeschützte Container ohne
+# Berechtigungen). Prüft außerdem die Fehleranzeige bei falschem API-Key
+# und scripts/backup.sh. Kollidiert nicht mit einem laufenden
+# Produktions-Stack (eigene Namen, Ports und Datenverzeichnisse).
 #
 # Varianten (Umgebungsvariablen):
 #   IT_PUID/IT_PGID    Besitzer der Intelligence-Daten (Standard: aktueller Benutzer)
@@ -33,8 +35,11 @@ PRECREATE_DATA="${IT_PRECREATE_DATA:-1}"
 LEGACY_USER="${IT_LEGACY_USER:-0}"
 
 COMPOSE_FILES=(-f "$ROOT/docker-compose.yml" -f "$ROOT/tests/integration/compose.override.yml")
+# The same files for scripts/backup.sh, which docker compose reads from COMPOSE_FILE
+COMPOSE_FILE_LIST="$ROOT/docker-compose.yml:$ROOT/tests/integration/compose.override.yml"
 if [ "$LEGACY_USER" = 1 ]; then
     COMPOSE_FILES+=(-f "$WORK/legacy-user.yml")
+    COMPOSE_FILE_LIST+=":$WORK/legacy-user.yml"
 fi
 
 compose() {
@@ -59,6 +64,20 @@ trap cleanup EXIT
 json() {
     # json <python expression on variable d>
     python3 -c "import json, sys; d = json.load(sys.stdin); print($1)"
+}
+
+# wait_for_health <python condition on d = /healthz body> <description>
+wait_for_health() {
+    local body=""
+    for _ in $(seq 60); do
+        body=$(curl -sS "http://localhost:$IT_PORT/healthz" 2>/dev/null) || true
+        if [ -n "$body" ] && json "bool($1)" <<< "$body" 2>/dev/null | grep -qx True; then
+            return 0
+        fi
+        sleep 2
+    done
+    echo "Timed out waiting for $2; last /healthz: $body"
+    exit 1
 }
 
 step() { echo "==> $*"; }
@@ -113,6 +132,8 @@ sed -i "s|^MINIFLUX_API_KEY=.*|MINIFLUX_API_KEY=$API_KEY|" "$WORK/.env"
 compose up -d --build --wait --wait-timeout 300 intelligence
 
 step "Checking results"
+# /healthz answers 'starting' (200) until the first run succeeded
+wait_for_health 'd["status"] == "ok"' "the first clustering run"
 curl -fsS "http://localhost:$IT_PORT/healthz" | json 'd["last_stats"]'
 STORIES=$(curl -fsS "http://localhost:$IT_PORT/api/stories")
 echo "$STORIES" | python3 -c '
@@ -149,6 +170,26 @@ grep -q "href=\"http://192.0.2.10:$MF_PORT/feed/" <<< "$HTML" \
 OWNER=$(stat -c %u:%g "$WORK/data/intelligence/arsse.db")
 echo "    arsse.db owned by $OWNER"
 [ "$OWNER" = "$PUID:$PGID" ] || { echo "Expected arsse.db owned by $PUID:$PGID, got $OWNER"; exit 1; }
+# Template for the user's own settings, created on the first start
+OWNER=$(stat -c %u:%g "$WORK/data/intelligence/config.yaml")
+[ "$OWNER" = "$PUID:$PGID" ] || { echo "Expected config.yaml owned by $PUID:$PGID, got $OWNER"; exit 1; }
+
+step "Checking the hardened intelligence container"
+CONTAINER=$(compose ps -q intelligence)
+docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.Memory}}' \
+    "$CONTAINER" | tee /dev/stderr | grep -qiE '^true \[(cap_)?all\] 805306368$' \
+    || { echo "intelligence is not read-only, without capabilities and limited to 768 MB"; exit 1; }
+if compose exec -T intelligence sh -c 'echo x > /app/web.py' 2>/dev/null; then
+    echo "The code in /app is writable"; exit 1
+fi
+STATUS=$(compose exec -T intelligence cat /proc/1/status | tr -d '\r')
+PROC_IDS=$(awk '/^Uid:/ {u = $2} /^Gid:/ {g = $2} END {print u ":" g}' <<< "$STATUS")
+echo "    service runs as $PROC_IDS"
+[ "$PROC_IDS" = "$PUID:$PGID" ] || { echo "Expected the service to run as $PUID:$PGID"; exit 1; }
+CAPS=$(awk '/^CapEff:/ {print $2}' <<< "$STATUS")
+[ "$CAPS" = 0000000000000000 ] || { echo "The service keeps capabilities: $CAPS"; exit 1; }
+docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$(compose ps -q miniflux)" | grep -qx true \
+    || { echo "Miniflux is not read-only"; exit 1; }
 
 step "Checking security defaults"
 http_code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
@@ -206,6 +247,32 @@ assert not any("Prozessor" in t for t in titles), f"read story still listed: {ti
 curl -fsS "http://localhost:$IT_PORT/api/stories?alle=1" | grep -q "Prozessor" \
     || { echo "The read story is missing from ?alle=1"; exit 1; }
 
+step "Backing up with scripts/backup.sh"
+COMPOSE_PROJECT_NAME=arsse-it COMPOSE_FILE="$COMPOSE_FILE_LIST" ENV_FILE="$WORK/.env" \
+    "$ROOT/scripts/backup.sh" "$WORK/backup"
+BACKUP=$(find "$WORK/backup" -mindepth 1 -maxdepth 1 -type d -name '20*' | head -n 1)
+[ -n "$BACKUP" ] || { echo "No backup directory"; exit 1; }
+[ "$(head -c 5 "$BACKUP/miniflux.dump")" = PGDMP ] || { echo "miniflux.dump is no pg_dump archive"; exit 1; }
+grep -q "http://feeds:8000/alpha.xml" "$BACKUP/feeds.opml" || { echo "feeds.opml lacks the feeds"; exit 1; }
+python3 - "$BACKUP/arsse.db" <<'PY' || { echo "arsse.db backup unusable"; exit 1; }
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+assert conn.execute('SELECT COUNT(*) FROM stories').fetchone()[0] > 0
+PY
+[ "$(stat -c %a "$BACKUP/env")" = 600 ] || { echo "env backup is not mode 600"; exit 1; }
+cmp -s "$WORK/.env" "$BACKUP/env" || { echo "env backup differs from .env"; exit 1; }
+echo "    $(find "$BACKUP" -mindepth 1 -printf '%f ')"
+
+step "Showing why clustering fails (rejected API key)"
+sed -i "s|^MINIFLUX_API_KEY=.*|MINIFLUX_API_KEY=falsch|" "$WORK/.env"
+compose up -d intelligence
+wait_for_health '(d["last_error"] or {}).get("message") == "Miniflux lehnt den API-Key ab"' \
+    "the error of the rejected API key"
+curl -fsS "http://localhost:$IT_PORT/" | grep -q "Fehler seit" \
+    || { echo "The front page does not show the error"; exit 1; }
+sed -i "s|^MINIFLUX_API_KEY=.*|MINIFLUX_API_KEY=$API_KEY|" "$WORK/.env"
+
 step "Protecting Top Stories with a password (WEB_AUTH_MODE=basic)"
 cat >> "$WORK/.env" <<ENV
 WEB_AUTH_MODE=basic
@@ -231,5 +298,7 @@ CODE=$(http_code "http://localhost:$IT_PORT/?seite=1")
 [ "$CODE" = 401 ] || { echo "Expected 401 for ?seite=1 without credentials, got $CODE"; exit 1; }
 CODE=$(http_code -u "leser:$WEB_PASSWORD" -H "Host: rebind.example:$IT_PORT" "http://localhost:$IT_PORT/")
 [ "$CODE" = 400 ] || { echo "Expected 400 for a foreign Host header, got $CODE"; exit 1; }
+# The good key is back: the next run clears the error
+wait_for_health 'd["last_error"] is None and d["status"] == "ok"' "the error to clear"
 
 step "Integration test passed"

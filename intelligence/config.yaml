@@ -1,8 +1,21 @@
 # ===========================================
 # aRSSe Intelligence Layer Configuration
 # ===========================================
-# Reihenfolge: Defaults < diese Datei < Umgebungsvariablen (.env).
-# Leere Umgebungsvariablen werden ignoriert.
+# Referenz aller Einstellungen mit ihren Standardwerten. Diese Datei ist
+# Teil des Images (/app/config.yaml) – bitte NICHT hier ändern: Updates des
+# Images und 'git pull' würden Ihre Änderungen verwerfen bzw. blockieren.
+#
+# Eigene Einstellungen gehören nach DATA_PATH/intelligence/config.yaml
+# (im Container /app/data/config.yaml, Unraid:
+# /mnt/user/appdata/arsse/intelligence/config.yaml). Dort nur eintragen, was
+# abweichen soll, z.B.
+#   web:
+#     min_sources: 3
+# Die Datei wird beim ersten Start mit Beispielen angelegt.
+#
+# Reihenfolge: Defaults < diese Datei < DATA_PATH/intelligence/config.yaml
+# < Umgebungsvariablen (.env bzw. Unraid-Template). Leere
+# Umgebungsvariablen werden ignoriert.
 # Zahlen ohne Anführungszeichen angeben. Ungültige Werte verhindern den Start;
 # die Meldung im Log nennt die betroffene Einstellung.
 
@@ -140,7 +153,7 @@ scheduling:
   # wachsen quadratisch). Wird die Grenze erreicht, fehlen die ältesten Artikel.
   max_entries: 2000
 
-  # Zeitfenster für Artikel-Analyse (Stunden, mindestens 1)
+  # Zeitfenster für Artikel-Analyse (Stunden, mindestens 1; LOOKBACK_HOURS)
   lookback_hours: 24
 
   # Alle so viele Minuten fragt der Dienst Miniflux nach Artikeln, die dort
@@ -153,13 +166,13 @@ storage:
   db_path: "/app/data/arsse.db"
   # Artikel, die älter sind, und Stories, die so lange nicht mehr
   # aufgetaucht sind, werden gelöscht
-  # (mindestens 1 und mindestens so lang wie lookback_hours)
+  # (mindestens 1 und mindestens so lang wie lookback_hours; RETENTION_DAYS)
   retention_days: 7
 
 # Top-Stories-Weboberfläche
 web:
   # Der Port ist fest 8081 im Container; extern über INTELLIGENCE_PORT in .env
-  # Maximale Anzahl angezeigter Stories (über alle Seiten)
+  # Maximale Anzahl angezeigter Stories (über alle Seiten; WEB_MAX_STORIES)
   max_stories: 100
   # Stories pro Seite (?seite=2 usw.); kurze Seiten brauchen auf E-Ink-Readern
   # kein Scrollen (WEB_PAGE_SIZE)
@@ -169,6 +182,7 @@ web:
   # Nur Stories aus mindestens so vielen Feeds anzeigen
   # (blendet Werbeblöcke und Serien eines einzelnen Feeds aus).
   # Gezählt werden nur Artikel aus dem Zeitfenster (lookback_hours).
+  # Umgebungsvariable: WEB_MIN_SOURCES
   min_sources: 2
   # Ältere Artikel einer Story (vor dem Zeitfenster), die ihre Seite unter
   # „Frühere Berichte“ zusätzlich auflistet (0 = keine)
@@ -229,5 +243,6 @@ logging:
   # JSON-Format für strukturierte Logs
   json_format: false
 
-  # Zusätzliche Log-Datei (leer = nur stdout), z.B. "/app/data/intelligence.log"
+  # Zusätzliche Log-Datei (leer = nur stdout), z.B. "/app/data/intelligence.log".
+  # Wird bei 5 MB rotiert, drei ältere Dateien bleiben (.1 bis .3)
   file: ""
