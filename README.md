@@ -204,7 +204,7 @@ Miniflux funktioniert als PWA. Auf E-Ink-Android-Geräten (z.B. Boox Palma):
 2. Wählen Sie "Zum Startbildschirm hinzufügen"
 3. Die App verhält sich dann wie eine native Anwendung
 
-Die Top Stories lassen sich genauso auf den Startbildschirm legen (eigenes Icon, Name „aRSSe“). Als eigenständige App ohne Adressleiste installiert Chrome sie nur über HTTPS (siehe [Reverse Proxy](#reverse-proxy-https)); unter `http://tower:8081` entsteht eine Verknüpfung, die im Browser öffnet. Einen Service Worker gibt es nicht – die Seiten bleiben ohne JavaScript und brauchen eine Verbindung zum Server. Für ein Always-on-Display (z.B. ein E-Ink-Tablet an der Wand) die Adresse mit `?auto=1` öffnen: Die Seite lädt sich dann alle 30 Minuten neu.
+Die Top Stories lassen sich genauso auf den Startbildschirm legen (eigenes Icon, Name „aRSSe“). Als eigenständige App ohne Adressleiste installiert Chrome sie nur über HTTPS (siehe [Reverse Proxy](#reverse-proxy-https)); unter `http://tower:8081` entsteht eine Verknüpfung, die im Browser öffnet. Einen Service Worker gibt es nicht – die Seiten bleiben ohne JavaScript und brauchen eine Verbindung zum Server. Für ein Always-on-Display (z.B. ein E-Ink-Tablet an der Wand) die Adresse mit `?auto=1` öffnen: Die Seite lädt sich dann alle 30 Minuten neu. Wer dort weitergeblättert hat, landet beim Neuladen auf der letzten Seite, wenn es inzwischen weniger Stories gibt.
 
 ### Native Apps
 

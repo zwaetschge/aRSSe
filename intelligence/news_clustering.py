@@ -48,6 +48,10 @@ _TEASER_TAIL = re.compile(
     r'(?:\s*\[\s*mehr\s*\]|\s*\bweiterlesen\W*'
     r'|(?:^|(?<=[.!?:"“”»)]))\s*mehr\s*(?:\.{2,}|…|»|›)?)\s*$',
     re.IGNORECASE)
+# A teaser tail is short, so each pass of clean_snippet() only searches this
+# far back from the end: text ending in thousands of tails then costs linear
+# instead of quadratic time
+_TEASER_TAIL_WINDOW = 64
 # Long articles add little signal but cost a lot of vectorization time
 MAX_CONTENT_CHARS = 5000
 # HTML beyond this is not even parsed: a broken or hostile feed item of
@@ -654,11 +658,14 @@ def clean_snippet(text: str, title: str = '') -> str:
     just the title again.
     """
     text = text.strip()
-    while True:
-        stripped = _TEASER_TAIL.sub('', text).rstrip()
-        if stripped == text:
-            break
-        text = stripped
+    # Tails are removed from the end one by one; moving an end index instead
+    # of re-scanning and copying the whole text keeps this linear
+    end = len(text)
+    while match := _TEASER_TAIL.search(text, max(0, end - _TEASER_TAIL_WINDOW), end):
+        end = match.start()
+        while end and text[end - 1].isspace():
+            end -= 1
+    text = text[:end]
     if len(text) < MIN_SNIPPET_CHARS or text.lower() in ('none', 'null'):
         return ''
     if _comparable(text) == _comparable(title):

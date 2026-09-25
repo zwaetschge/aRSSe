@@ -433,11 +433,16 @@ Teil-Refresh mit Geisterbildern kostet:
 - *Titel ohne Text:* Ein Artikel ohne Titel (z. B. ein Nachrichtenticker) erscheint als
   „MDR: +++ Landtag wählt …“ (Feed und die ersten 80 Zeichen) statt „(ohne Titel)“.
 - *Bedienung:* Jede Zeile der Berichterstattung ist ein Block-Link mit Quelle und Uhrzeit,
-  mindestens 44 px hoch. Titel sind dünn unterstrichen, besuchte Links gepunktet (ohne
-  Farben auf Graustufen-Displays sonst nicht zu unterscheiden). Pfeile sind für
+  mindestens 44 px hoch. Titel sind dünn unterstrichen; bereits geöffnete Artikel
+  erscheinen grau (ohne Farben auf Graustufen-Displays sonst nicht zu unterscheiden;
+  `:visited` darf nur Farben ändern, eine gepunktete Unterstreichung ignorieren die
+  Browser). „Gleichlautende Meldungen“ behält sein Aufklapp-Dreieck. Pfeile sind für
   Screenreader ausgeblendet (`aria-hidden`).
 - *Always-on:* `?auto=1` lädt die Seite alle 30 Minuten neu (`<meta http-equiv=refresh>`,
-  kein JavaScript); die Seiten-Links behalten den Parameter.
+  kein JavaScript); die Seiten-Links behalten den Parameter. Gibt es die Seite nach dem
+  Neuladen nicht mehr (Stories sind aus dem Zeitfenster gefallen), leitet `?auto=1` auf
+  die letzte vorhandene Seite um statt auf eine 404 ohne Neuladen; ohne `?auto=1` bleibt
+  es bei 404.
 - *Startbildschirm:* `intelligence/static/` enthält `manifest.webmanifest` (`start_url` `/`,
   `display: standalone`), PNG-Icons in 192 und 512 px, ein SVG-Icon und `favicon.ico`
   (auch unter `/favicon.ico`). Die Icons erzeugt `scripts/make-icons.py` nur mit der

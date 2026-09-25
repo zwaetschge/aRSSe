@@ -36,8 +36,10 @@
     font: 1.05rem/1.5 Georgia, "Times New Roman", serif;
   }
   a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: .15em; }
-  /* Grayscale screens have no link colours: dotted = already opened */
-  a:visited { text-decoration-style: dotted; }
+  /* Grayscale screens have no link colours: gray = article already opened.
+     Browsers apply only colours in :visited rules (a dotted underline would
+     be ignored), so the text itself turns gray. */
+  h2 a:visited, ul.coverage a:visited { color: var(--muted); }
   header {
     display: flex;
     justify-content: space-between;
@@ -51,11 +53,13 @@
   header h1 { margin: 0; font-size: 1.6rem; letter-spacing: .02em; }
   header h1 a { text-decoration: none; }
   /* Tap targets: at least 44px high (E-Ink touch panels are imprecise) */
-  header nav a, .pager a, .views a, .views span, .more, .original, details summary {
+  header nav a, .pager a, .views a, .views span, .more, .original {
     display: inline-block;
     min-height: 44px;
     line-height: 44px;
   }
+  /* list-item keeps the disclosure triangle, the only sign it can be opened */
+  details summary { display: list-item; min-height: 44px; line-height: 44px; cursor: pointer; }
   header nav a { padding: 0 .5rem; }
   .meta, .status, ul.coverage time { color: var(--muted); font-size: .85rem; }
   .status { margin: 0 0 .25rem; }
@@ -84,7 +88,6 @@
   .views { margin: .5rem 0 0; }
   .views a, .views span { padding: 0 .5rem 0 0; }
   .views span { font-weight: bold; }
-  details summary { cursor: pointer; }
   .more { margin-top: .5rem; }
   .empty { padding: 2rem 0; text-align: center; }
 </style>

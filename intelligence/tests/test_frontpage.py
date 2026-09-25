@@ -6,6 +6,7 @@ targets and the home-screen files (manifest, icons).
 import json
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -118,6 +119,27 @@ def test_auto_refresh_only_on_request(config, store):
     assert 'href="/?seite=2&amp;auto=1"' in html
 
 
+def test_auto_refresh_survives_fewer_pages(config, store):
+    config.web.page_size = 3
+    save_stories(store, 7)
+    http = create_app(config, store).test_client()
+    assert http.get('/?seite=3&auto=1').status_code == 200
+    # Stories age out, two pages are left (the cap stands in for that): the
+    # display reloading page 3 lands on the last page instead of a 404 that
+    # never reloads
+    config.web.max_stories = 5
+    response = http.get('/?seite=3&auto=1')
+    assert response.status_code == 302
+    assert response.headers['Location'] == '/?seite=2&auto=1'
+    html = http.get('/?seite=3&auto=1', follow_redirects=True).get_data(as_text=True)
+    assert 'Seite 2 von 2' in html and 'http-equiv="refresh"' in html
+    # Down to one page: back to the plain front page, still refreshing
+    config.web.max_stories = 2
+    assert http.get('/?seite=3&auto=1').headers['Location'] == '/?auto=1'
+    # Without auto=1 a page past the end stays a 404
+    assert http.get('/?seite=3').status_code == 404
+
+
 FEED_NAMES = ['Tagesschau', 'Spiegel', 'Zeit', 'FAZ', 'SZ', 'taz', 'Deutschlandfunk', 'n-tv']
 
 
@@ -196,6 +218,7 @@ def test_chronological_view_lists_oldest_first_by_day(config, store):
     entries = [entry(1, 1, hours_ago=1, snippet='Neuester Stand der Dinge, ausführlich.'),
                entry(2, 2, hours_ago=18), entry(3, 3, hours_ago=2)]
     story_id = store.save_run(entries, [ClusterResult([1, 2, 3], 1, set())])[0]
+    config.web.timezone = 'Europe/Berlin'  # the expected day labels are Berlin days
     http = create_app(config, store).test_client()
 
     html = http.get(f'/story/{story_id}?ansicht=chronologisch').get_data(as_text=True)
@@ -314,6 +337,16 @@ def test_clean_snippet(text, cleaned):
     assert clean_snippet(text, 'Bundestag beschließt Haushalt') == cleaned
 
 
+@pytest.mark.parametrize('tail', ['[ mehr ] ', 'Weiterlesen '])
+def test_clean_snippet_is_linear_in_repeated_tails(tail):
+    # A hostile item ending in thousands of teaser links (up to
+    # MAX_HTML_CHARS of HTML) must not stall every clustering run
+    text = 'Die Koalition hat sich geeinigt. ' + tail * 20000
+    started = time.perf_counter()
+    assert clean_snippet(text) == 'Die Koalition hat sich geeinigt.'
+    assert time.perf_counter() - started < 1
+
+
 def test_stored_snippets_are_clean(config, store):
     entries = sample_entries()
     entries[0]['content'] = '<p>Der Bundestag hat den Haushalt beschlossen.</p> [ mehr ]'
@@ -345,7 +378,10 @@ def test_links_are_large_tap_targets(config, store):
     NewsClusterer(config, store, client=FakeClient(sample_entries())).run_clustering_cycle()
     html = create_app(config, store).test_client().get('/').get_data(as_text=True)
     assert 'ul.coverage a { display: block; padding: .6rem 0; min-height: 44px; }' in html
-    assert 'a:visited { text-decoration-style: dotted; }' in html
+    # :visited rules may only change colours, anything else is ignored
+    visited = re.findall(r'a:visited \{([^}]*)\}', html)
+    assert visited and all(re.fullmatch(r'\s*color: var\(--muted\);\s*', rule)
+                           for rule in visited)
     # Source and time are part of the link, not separate small targets
     assert re.search(r'<li><a href="[^"]+/entry/\d+"><b>[^<]+:</b> [^<]+ <time ', html)
     story_id = store.top_stories(24, 50)[0]['id']
@@ -354,6 +390,9 @@ def test_links_are_large_tap_targets(config, store):
     assert re.search(r'<a class="original meta" href="https://example\.org/\d+" '
                      r'rel="noopener noreferrer" aria-label="Original bei [^"]+">', page)
     assert '<span aria-hidden="true">←</span> Zurück' in page
+    # The disclosure triangle is only drawn while summary is a list-item
+    assert 'details summary { display: list-item; min-height: 44px;' in page
+    assert not re.search(r'summary[^{]*\{[^}]*display: inline-block', page)
 
 
 # --- Home-screen install ------------------------------------------------------
@@ -419,8 +458,35 @@ def basic_config(config):
     return config
 
 
+def decoded_png(data: bytes) -> list:
+    """The chunks of a PNG with the image data decompressed, CRCs left out."""
+    import struct
+    import zlib
+    assert data[:8] == b'\x89PNG\r\n\x1a\n'
+    chunks, idat, pos = [], b'', 8
+    while pos < len(data):
+        length, kind = struct.unpack('>I4s', data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + length]
+        if kind == b'IDAT':
+            idat += body
+        else:
+            chunks.append((kind, body))
+        pos += 12 + length
+    return chunks + [(b'pixels', zlib.decompress(idat))]
+
+
+def decoded_ico(data: bytes) -> tuple:
+    """Header and directory entry of a one-image .ico (without the image size) and its PNG."""
+    import struct
+    *entry, image_size, offset = struct.unpack('<BBBBHHII', data[6:22])
+    assert offset == 22 and len(data) == offset + image_size
+    return data[:6], entry, decoded_png(data[offset:])
+
+
 def test_make_icons_is_reproducible(tmp_path, monkeypatch):
     import importlib.util
+    import types
+    import zlib
     from pathlib import Path
     script = Path(__file__).resolve().parents[2] / 'scripts' / 'make-icons.py'
     spec = importlib.util.spec_from_file_location('make_icons', script)
@@ -428,9 +494,18 @@ def test_make_icons_is_reproducible(tmp_path, monkeypatch):
     spec.loader.exec_module(module)
     static = Path(web_module.STATIC_DIR)
     monkeypatch.setattr(module, 'STATIC', tmp_path)
+    # Deflate output differs between implementations (zlib-ng on newer
+    # distributions), so the pixels are compared, not the compressed bytes;
+    # a different compression level stands in for another implementation
+    monkeypatch.setattr(module, 'zlib', types.SimpleNamespace(
+        crc32=zlib.crc32, compress=lambda data, level=-1: zlib.compress(data, 1)))
     module.main()
-    for name in ('icon-192.png', 'icon-512.png', 'favicon.ico', 'icon.svg'):
-        assert (tmp_path / name).read_bytes() == (static / name).read_bytes(), name
+    for name in ('icon-192.png', 'icon-512.png'):
+        assert decoded_png((tmp_path / name).read_bytes()) \
+            == decoded_png((static / name).read_bytes()), name
+    assert decoded_ico((tmp_path / 'favicon.ico').read_bytes()) \
+        == decoded_ico((static / 'favicon.ico').read_bytes())
+    assert (tmp_path / 'icon.svg').read_bytes() == (static / 'icon.svg').read_bytes()
 
 
 def test_single_page_story_count_wording(config, store):

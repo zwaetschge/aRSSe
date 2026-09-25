@@ -16,8 +16,8 @@ from itertools import groupby
 from typing import Optional
 from urllib.parse import urlsplit
 
-from flask import (Flask, Response, abort, g, jsonify, render_template, request,
-                   send_from_directory, url_for)
+from flask import (Flask, Response, abort, g, jsonify, redirect, render_template,
+                   request, send_from_directory, url_for)
 from markupsafe import Markup
 
 from config import Config, WebAuthConfig, resolve_timezone
@@ -374,6 +374,10 @@ def create_app(config: Config, store: StoryStore) -> Flask:
             config.web.exclude_patterns)
         pages = max(1, -(-total // page_size))
         if page > pages:
+            # An always-on display stays on the page it paged to; when stories
+            # age out it must land on the last page, not a 404 that never reloads
+            if request.args.get('auto') == '1':
+                return redirect(page_url(pages))
             abort(404)
         return render_template(
             'index.html',
