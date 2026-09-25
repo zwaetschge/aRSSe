@@ -121,33 +121,24 @@ Links führen in Miniflux (`BASE_URL`), damit Gelesen-Status und Volltext erhalt
 
 Eigene Einstellungen gehören in `${DATA_PATH}/intelligence/config.yaml` (im Container `/app/data/config.yaml`, Unraid: `/mnt/user/appdata/arsse/intelligence/config.yaml`). Die Datei liegt neben der Story-Datenbank, bleibt bei Updates des Images und bei `git pull` erhalten und ist in Backups enthalten; `scripts/setup.sh` bzw. der erste Start legen sie mit auskommentierten Beispielen an. Tragen Sie dort nur ein, was vom Standard abweichen soll, und starten Sie danach neu (`docker compose restart intelligence`). Alle Einstellungen mit Erklärung stehen in [`intelligence/config.yaml`](intelligence/config.yaml) – diese Datei ist die Referenz im Image und wird nicht geändert.
 
-Reihenfolge: Standardwerte < `intelligence/config.yaml` (im Image) < `${DATA_PATH}/intelligence/config.yaml` < Umgebungsvariablen (`.env` bzw. Unraid-Template). Abschnitte werden zusammengeführt: Es gilt jede Einstellung, die in Ihrer Datei steht, alle anderen behalten ihren Standard; Listen und Tabellen (z.B. `source_scores`, `exclude_patterns`) ersetzen den Standard ganz. Ein Beispiel mit allen Abschnitten:
+Reihenfolge: Standardwerte < `intelligence/config.yaml` (im Image) < `${DATA_PATH}/intelligence/config.yaml` < Umgebungsvariablen (`.env` bzw. Unraid-Template). Abschnitte werden zusammengeführt: Es gilt jede Einstellung, die in Ihrer Datei steht, alle anderen behalten ihren Standard; Listen und Tabellen (z.B. `source_scores`, `exclude_patterns`) ersetzen den Standard ganz. Ein Beispiel, das nur Abweichungen enthält:
 
 ```yaml
 # ${DATA_PATH}/intelligence/config.yaml
-clustering:
-  threshold: 0.75                # max. durchschnittliche Kosinus-Distanz einer Story
-  min_pair_similarity: 0.30      # Mindest-Ähnlichkeit einer Story aus nur zwei Artikeln
-  topic_threshold: 0.9           # Themen für „Mehr zum Thema“ (0 = aus)
-  stemming: true
-  # noise_title_patterns: Liste von Titelmustern (Werbung, Podcasts, Liveblogs …),
-  # die keine Schlagzeile werden, solange die Story andere Artikel hat
-
-deduplication:
-  threshold: 0.85                # Duplikat-Schwellenwert (Text ohne Titel)
-  min_body_tokens: 25            # kürzere Texte verschiedener Feeds sind nie Duplikate (außer gleiche URL und gleicher Titel)
-  duplicate_action: "mark_read"  # oder "none"
-  mark_read_scope: "visible"     # oder "all" (auch Stories, die die Startseite nicht zeigt)
-
 scheduling:
-  interval_minutes: 30           # Ausführungsintervall
-  status_sync_minutes: 5         # in Miniflux Gelesenes übernehmen (0 = aus)
+  interval_minutes: 15           # öfter clustern (Standard 30)
 
 web:
-  page_size: 10                  # Stories pro Seite (WEB_PAGE_SIZE)
-  max_stories: 100               # insgesamt, über alle Seiten
-  exclude_patterns: ['^Wetter\b']  # Stories nur aus solchen Titeln nicht anzeigen
+  min_sources: 3                 # nur Stories aus mindestens drei Feeds
+  exclude_patterns:              # ersetzt die Standardliste ganz, daher deren Muster mit aufführen
+    - '^Wetter\b'
+    - '^Lotto'
+
+deduplication:
+  duplicate_action: "none"       # Duplikate nicht als gelesen markieren
 ```
+
+Welche Einstellungen es gibt und welche Standardwerte gelten (z.B. `clustering.threshold`, `deduplication.threshold`, `web.page_size`), steht mit Erklärung in der Referenz [`intelligence/config.yaml`](intelligence/config.yaml). Übernehmen Sie von dort nur, was Sie wirklich ändern: Jede Einstellung in Ihrer Datei hält ihren Wert fest, auch wenn eine spätere Version den Standard verbessert.
 
 Umgebungsvariablen aus `.env` (z.B. `CLUSTERING_THRESHOLD`) überschreiben beide Dateien; auskommentierte bzw. leere Variablen tun das nicht. Für das Unraid-Template gibt es zusätzlich `LOOKBACK_HOURS`, `RETENTION_DAYS`, `WEB_MIN_SOURCES` und `WEB_MAX_STORIES`.
 
@@ -233,6 +224,7 @@ aRSSe/
 │   ├── backup.sh           # Backup von Datenbanken, Abos und .env
 │   ├── make-icons.py       # Erzeugt die Icons in intelligence/static
 │   ├── check-unraid-templates.py # Vergleicht die Templates mit docker-compose.yml
+│   ├── config-history.py   # Erzeugt intelligence/config.history.json aus der Git-Historie
 │   ├── test-setup.sh       # Test für setup.sh (ohne Docker)
 │   ├── test-backup.sh      # Test für backup.sh (ohne Docker)
 │   └── integration-test.sh # Stack-Test gegen echtes Miniflux
@@ -452,7 +444,7 @@ Updates holt Unraid wie bei anderen Containern (*Check for Updates*). Für Backu
 | `config.yaml` | Eigene Einstellungen des Intelligence Layers (falls vorhanden) |
 | `env` | Kopie der `.env` mit allen Passwörtern (Rechte 600) |
 
-`miniflux.dump` und `env` sind Pflicht; scheitert einer der anderen Teile (z.B. läuft der Intelligence Layer gerade nicht), meldet das Skript eine Warnung und behält die Sicherung ohne ihn. Sicherungen, die älter als `BACKUP_KEEP_DAYS` Tage sind (Standard 14), löscht das Skript danach. Die Sicherungen enthalten Passwörter – legen Sie eine Kopie auf ein anderes Laufwerk. Auf Unraid planen Sie das Skript mit dem Plugin *User Scripts*, z.B. täglich:
+`miniflux.dump` und `env` sind Pflicht; scheitert einer der anderen Teile (z.B. läuft der Intelligence Layer gerade nicht), meldet das Skript eine Warnung und behält die Sicherung ohne ihn. Sicherungen, die älter als `BACKUP_KEEP_DAYS` Tage sind (Standard 14), löscht das Skript danach – nur seine eigenen (Verzeichnisname mit Zeitstempel und Markierungsdatei `.arsse-backup`), andere Ordner in `BACKUP_DIR` bleiben unberührt. Ein relatives `BACKUP_DIR` in `.env` gilt wie `DATA_PATH` ab dem Projektverzeichnis, ein relatives Argument ab dem aktuellen Verzeichnis. Die Sicherungen enthalten Passwörter – legen Sie eine Kopie auf ein anderes Laufwerk. Auf Unraid planen Sie das Skript mit dem Plugin *User Scripts*, z.B. täglich:
 
 ```bash
 #!/bin/bash

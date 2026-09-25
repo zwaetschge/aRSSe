@@ -835,23 +835,32 @@ def record_error(store: StoryStore, config: Config, error: BaseException) -> Non
     'at' is when this error first occurred: it stays while the same error
     repeats, so the front page can say 'Fehler seit 10:30'. 'last' is the
     latest failure, so /healthz can tell failures since the start from
-    one stored before a restart. Never raises.
+    one stored before a restart. If the database cannot be written (often
+    the very error to report), the error is kept in store.unsaved_error
+    instead, which StoryStore.last_error() prefers. Never raises.
     """
     kind, message = describe_error(error, config)
+    now = datetime.now(timezone.utc).isoformat()
     try:
-        now = datetime.now(timezone.utc).isoformat()
-        previous = store.get_meta('last_error')
-        if isinstance(previous, dict) and previous.get('message') == message:
-            at = previous.get('at') or now
-        else:
-            at = now
-        store.set_meta('last_error', {'at': at, 'last': now, 'kind': kind, 'message': message})
+        previous = store.last_error()
+    except Exception:  # not even readable
+        previous = store.unsaved_error
+    if isinstance(previous, dict) and previous.get('message') == message:
+        at = previous.get('at') or now
+    else:
+        at = now
+    entry = {'at': at, 'last': now, 'kind': kind, 'message': message}
+    try:
+        store.set_meta('last_error', entry)
+        store.unsaved_error = None
     except Exception as e:  # e.g. the database itself is the problem
+        store.unsaved_error = entry
         logger.error("Failed to store the error of the clustering run: %s", e)
 
 
 def clear_error(store: StoryStore) -> None:
     """Forget the last error after a successful run."""
+    store.unsaved_error = None
     if store.get_meta('last_error') is not None:
         store.set_meta('last_error', None)
 

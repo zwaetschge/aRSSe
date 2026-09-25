@@ -504,7 +504,9 @@ erreichbar): `AccessUnauthorized` → „Miniflux lehnt den API-Key ab“ (`auth
 unter <URL> nicht erreichbar“ (`connection`), `sqlite3.OperationalError` → „Datenbank
 nicht beschreibbar“ (`database`), alles andere nur mit dem Namen der Ausnahme (`internal`).
 `at` bleibt, solange derselbe Fehler wiederkehrt („Fehler seit 10:30“), `last` ist der
-jüngste Fehlschlag; ein erfolgreicher Lauf löscht den Eintrag. Wiederholt wird nach 10 s, danach mit doppeltem Abstand bis
+jüngste Fehlschlag; ein erfolgreicher Lauf löscht den Eintrag. Lässt sich die Datenbank
+selbst nicht schreiben, hält `StoryStore.unsaved_error` den Eintrag im Speicher;
+Startseite und `/healthz` lesen `StoryStore.last_error()`, das ihn dann vorzieht. Wiederholt wird nach 10 s, danach mit doppeltem Abstand bis
 höchstens `min(Intervall, 5 min)`.
 
 `/healthz` antwortet `ok` (200), solange der letzte Erfolg weniger als drei Intervalle

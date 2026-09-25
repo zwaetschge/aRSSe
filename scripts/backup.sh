@@ -12,13 +12,17 @@
 #                  Online-Sicherung)
 #   config.yaml    eigene Einstellungen des Intelligence Layers (falls vorhanden)
 #   env            Kopie der .env mit allen Passwörtern (Rechte 600)
+#   .arsse-backup  Markierung: nur so markierte Verzeichnisse rotiert das Skript
 # miniflux.dump und env sind Pflicht; scheitert einer der anderen Teile, gibt
 # es eine Warnung, und die Sicherung bleibt ohne ihn erhalten.
 # Sicherungen, die älter als BACKUP_KEEP_DAYS Tage sind (Standard 14), werden
-# danach gelöscht. Wiederherstellen: README, Abschnitt "Backup und Updates".
+# danach gelöscht; andere Verzeichnisse in BACKUP_DIR bleiben unberührt.
+# Wiederherstellen: README, Abschnitt "Backup und Updates".
 #
 # Aufruf: scripts/backup.sh [ZIELVERZEICHNIS]
 #   ZIELVERZEICHNIS  Standard: BACKUP_DIR aus .env, sonst DATA_PATH/backups
+#                    (relativ: das Argument zum aktuellen Verzeichnis, Pfade
+#                    aus .env wie bei Compose zum Projektverzeichnis)
 #
 # Weitere Compose-Dateien und Projektnamen übernimmt docker compose wie
 # gewohnt aus COMPOSE_FILE und COMPOSE_PROJECT_NAME; ENV_FILE wählt eine
@@ -32,6 +36,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="${ENV_FILE:-$PROJECT_DIR/.env}"
 WORK_DIR=""
+# Markiert fertige Sicherungen dieses Skripts; nur sie werden rotiert
+MARKER=".arsse-backup"
+# Name einer Sicherung (date +%Y-%m-%d_%H%M%S), als Muster für find
+STAMP_GLOB='20[0-9][0-9]-[01][0-9]-[0-3][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]'
 
 info() { echo "[✓] $*"; }
 warn() { echo "[!] $*" >&2; }
@@ -127,13 +135,20 @@ main() {
     [ -f "$ENV_FILE" ] || fail "$ENV_FILE fehlt (erst scripts/setup.sh ausführen)"
     command -v docker > /dev/null || fail "Docker ist nicht installiert"
 
-    local data_path backup_dir keep stamp target postgres_user
+    local data_path backup_dir keep stamp target postgres_user old
     data_path=$(env_get DATA_PATH)
     data_path="${data_path:-./data}"
     [[ "$data_path" = /* ]] || data_path="$PROJECT_DIR/${data_path#./}"
-    backup_dir="${1:-$(env_get BACKUP_DIR)}"
-    backup_dir="${backup_dir:-$data_path/backups}"
-    [[ "$backup_dir" = /* ]] || backup_dir="$PWD/$backup_dir"
+    if [ -n "${1:-}" ]; then
+        backup_dir="$1"
+        [[ "$backup_dir" = /* ]] || backup_dir="$PWD/${backup_dir#./}"
+    else
+        # Wie DATA_PATH relativ zum Projektverzeichnis: Geplante Läufe (User
+        # Scripts, cron) starten in / oder $HOME, auf Unraid liegt / im RAM
+        backup_dir=$(env_get BACKUP_DIR)
+        backup_dir="${backup_dir:-$data_path/backups}"
+        [[ "$backup_dir" = /* ]] || backup_dir="$PROJECT_DIR/${backup_dir#./}"
+    fi
     keep=$(env_get BACKUP_KEEP_DAYS)
     keep="${keep:-14}"
     [[ "$keep" =~ ^[0-9]+$ ]] || fail "BACKUP_KEEP_DAYS muss eine Zahl sein, ist '$keep'"
@@ -190,14 +205,22 @@ main() {
     chmod 600 "$WORK_DIR/env"
     info ".env gesichert (Datei env, Rechte 600)"
 
+    echo "aRSSe-Sicherung $stamp (scripts/backup.sh)" > "$WORK_DIR/$MARKER"
     chmod 700 "$WORK_DIR"
     mv "$WORK_DIR" "$target"
     WORK_DIR=""
     info "Sicherung: $target"
 
-    # Rotation: nur fertige Sicherungen (Verzeichnisse mit Zeitstempel)
-    find "$backup_dir" -mindepth 1 -maxdepth 1 -type d -name '20[0-9][0-9]-*' \
-        -mtime +"$keep" -print -exec rm -rf {} + | sed 's/^/[✓] Alte Sicherung gelöscht: /'
+    # Rotation: nur fertige Sicherungen dieses Skripts (Name mit genau
+    # diesem Zeitstempel und Markierung). BACKUP_DIR kann eine gemeinsame
+    # Freigabe sein, deren andere Ordner (z.B. '2020-05-01@03.00' vom
+    # Appdata-Backup) nicht angetastet werden dürfen
+    while IFS= read -r -d '' old; do
+        [ -f "$old/$MARKER" ] || continue
+        rm -rf "$old"
+        info "Alte Sicherung gelöscht: $old"
+    done < <(find "$backup_dir" -mindepth 1 -maxdepth 1 -type d -name "$STAMP_GLOB" \
+                -mtime +"$keep" -print0)
 }
 
 main "$@"

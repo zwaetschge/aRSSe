@@ -377,6 +377,32 @@ def test_error_keeps_its_start_time_while_it_repeats(config, store):
     assert store.get_meta('last_error')['message'] == 'MINIFLUX_API_KEY fehlt'
 
 
+def test_error_is_shown_when_the_database_is_not_writable(config, store, monkeypatch):
+    # The error lives in the database that fails: it is kept in memory
+    config.miniflux_api_key = 'key'
+    NewsClusterer(config, store, client=FakeClient(sample_entries())).run_clustering_cycle()
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(sqlite3, 'connect', lambda path, *args, **kwargs: real_connect(
+        f'file:{path}?mode=ro', *args, uri=True, **kwargs))
+    stats = NewsClusterer(config, store,
+                          client=FakeClient(sample_entries())).run_clustering_cycle()
+    assert stats['errors'] == 1
+
+    http = create_app(config, store).test_client()
+    error = http.get('/healthz').get_json()['last_error']
+    assert error['message'] == 'Datenbank nicht beschreibbar'
+    html = http.get('/').get_data(as_text=True)
+    assert 'Fehler seit <time' in html and 'Datenbank nicht beschreibbar' in html
+
+    # 'at' stays while it repeats; a successful run forgets it
+    NewsClusterer(config, store, client=FakeClient(sample_entries())).run_clustering_cycle()
+    assert http.get('/healthz').get_json()['last_error']['at'] == error['at']
+    monkeypatch.setattr(sqlite3, 'connect', real_connect)
+    NewsClusterer(config, store, client=FakeClient(sample_entries())).run_clustering_cycle()
+    assert http.get('/healthz').get_json()['last_error'] is None
+    assert 'Fehler seit' not in http.get('/').get_data(as_text=True)
+
+
 def test_missing_api_key_is_stored_by_the_scheduler(config, store):
     config.miniflux_api_key = ''
     # main() takes the start time before the scheduler: a first run that

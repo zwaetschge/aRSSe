@@ -511,7 +511,7 @@ def create_app(config: Config, store: StoryStore, client=None,
             per_story=config.web.articles_per_story,
             related_max=RELATED_ON_FRONT_PAGE,
             last_success=store.get_meta('last_success'),
-            last_error=store.get_meta('last_error'),
+            last_error=store.last_error(),
         )
 
     @app.get('/story/<story_id>')
@@ -659,7 +659,7 @@ def create_app(config: Config, store: StoryStore, client=None,
         """
         now = datetime.now(timezone.utc)
         last_success = parse_date(store.get_meta('last_success'))
-        last_error = store.get_meta('last_error')
+        last_error = store.last_error()
         limit = timedelta(minutes=config.scheduling.interval_minutes * 3)
         if last_success is not None and now - last_success < limit:
             status = 'ok'

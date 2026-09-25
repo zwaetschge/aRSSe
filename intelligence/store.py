@@ -214,6 +214,9 @@ class StoryStore:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
+        # Error of the last run that could not be stored in meta 'last_error'
+        # (the database itself is not writable); see last_error()
+        self.unsaved_error = None
         rebuild_from = self._migrate()
         if rebuild_from is not None:
             self._move_aside(rebuild_from)
@@ -493,6 +496,17 @@ class StoryStore:
         with self._connect() as conn:
             row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return json.loads(row['value']) if row else default
+
+    def last_error(self):
+        """
+        Why the last clustering run failed, or None.
+
+        Meta 'last_error', unless storing the latest error failed: then the
+        error kept in memory, which is newer (see news_clustering.record_error).
+        """
+        if self.unsaved_error is not None:
+            return self.unsaved_error
+        return self.get_meta('last_error')
 
     def top_stories(self, max_age_hours: int, limit: int, min_sources: int = 1,
                     earlier_max: int = EARLIER_ARTICLES_MAX,

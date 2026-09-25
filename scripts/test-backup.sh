@@ -111,8 +111,15 @@ for _ in $(seq 50); do
 done
 
 step "Vollständige Sicherung"
-mkdir -p "$DATA/backups/2020-01-01_000000" "$DATA/backups/eigene-dateien"
-touch -d '30 days ago' "$DATA/backups/2020-01-01_000000" "$DATA/backups/eigene-dateien"
+# Alte eigene Sicherung (markiert) und alte fremde Ordner, z.B. vom
+# Appdata-Backup in einer gemeinsamen Freigabe
+FOREIGN=("eigene-dateien" "2020-05-01@03.00" "2021-dokumente" "2020-01-02_000000")
+for dir in 2020-01-01_000000 "${FOREIGN[@]}"; do
+    mkdir -p "$DATA/backups/$dir"
+    echo wichtig > "$DATA/backups/$dir/daten.tar"
+done
+echo "aRSSe-Sicherung" > "$DATA/backups/2020-01-01_000000/.arsse-backup"
+touch -d '30 days ago' "$DATA/backups/"*
 run_backup
 [ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS: $OUT"
 B=$(latest_backup)
@@ -127,7 +134,10 @@ cmp -s "$PROJ/.env" "$B/env" || fail "env ist keine Kopie der .env"
 [ "$(stat -c %a "$B/env")" = 600 ] || fail "env hat Rechte $(stat -c %a "$B/env")"
 [ "$(stat -c %a "$B")" = 700 ] || fail "Sicherungsverzeichnis hat Rechte $(stat -c %a "$B")"
 [ ! -e "$DATA/backups/2020-01-01_000000" ] || fail "alte Sicherung nicht gelöscht"
-[ -d "$DATA/backups/eigene-dateien" ] || fail "fremdes Verzeichnis gelöscht"
+for dir in "${FOREIGN[@]}"; do
+    [ -f "$DATA/backups/$dir/daten.tar" ] || fail "fremdes Verzeichnis $dir gelöscht"
+done
+[ -f "$B/.arsse-backup" ] || fail "Markierung .arsse-backup fehlt"
 grep -q "Alte Sicherung gelöscht" <<< "$OUT" || fail "Rotation nicht gemeldet"
 grep -q "exec -T -u $(id -u):$(id -g) intelligence python" "$DOCKER_LOG" \
     || fail "Python lief nicht als Besitzer des Datenverzeichnisses"
@@ -202,6 +212,23 @@ rm -rf "$WORK/ziel"
 STUB_RUNNING="intelligence" run_backup "$WORK/ziel"
 [ "$STATUS" -ne 0 ] || fail "backup.sh hätte abbrechen müssen"
 [ -z "$(ls -A "$WORK/ziel" 2>/dev/null)" ] || fail "Reste im Zielverzeichnis: $(ls -A "$WORK/ziel")"
+
+step "Relatives BACKUP_DIR aus .env gilt ab dem Projektverzeichnis"
+# Geplante Läufe starten in einem anderen Verzeichnis (run_backup: $WORK)
+cp "$PROJ/.env" "$WORK/env.orig"
+echo "BACKUP_DIR=./sicherungen" >> "$PROJ/.env"
+run_backup
+cp "$WORK/env.orig" "$PROJ/.env"
+[ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS: $OUT"
+[ -n "$(find "$PROJ/sicherungen" -mindepth 1 -maxdepth 1 -type d -name '20*' 2>/dev/null)" ] \
+    || fail "keine Sicherung in $PROJ/sicherungen"
+[ ! -e "$WORK/sicherungen" ] || fail "Sicherung im aktuellen Verzeichnis statt im Projekt"
+
+step "Relatives Argument gilt ab dem aktuellen Verzeichnis"
+run_backup ./ziel-relativ
+[ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS: $OUT"
+[ -n "$(find "$WORK/ziel-relativ" -mindepth 1 -maxdepth 1 -type d -name '20*' 2>/dev/null)" ] \
+    || fail "keine Sicherung in $WORK/ziel-relativ"
 
 step "Fehlerhafte Rotation"
 echo "BACKUP_KEEP_DAYS=zwei" >> "$PROJ/.env"
