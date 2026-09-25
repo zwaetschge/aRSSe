@@ -114,7 +114,7 @@ clustering:
 
 deduplication:
   threshold: 0.85                # Duplikat-Schwellenwert (Text ohne Titel)
-  min_body_tokens: 25            # kürzere Texte verschiedener Feeds sind nie Duplikate
+  min_body_tokens: 25            # kürzere Texte verschiedener Feeds sind nie Duplikate (außer gleiche URL und gleicher Titel)
   duplicate_action: "mark_read"  # oder "none"
   mark_read_scope: "visible"     # oder "all" (auch Stories, die die Startseite nicht zeigt)
 

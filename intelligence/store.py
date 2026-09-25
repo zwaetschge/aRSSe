@@ -83,7 +83,8 @@ UPDATE entries SET published_at = substr(published_at, 1, 19) || '+00:00'
 
 # Duplicates aRSSe marked read in Miniflux. A duplicate is marked only once:
 # if the user sets it back to unread, that decision stands. save_run never
-# touches this table; cleanup drops rows once the entry left the window.
+# touches this table; marked_at moves forward while the entry is still
+# fetched (refresh_auto_marked), and cleanup drops rows once it is not.
 SCHEMA_V3 = """
 CREATE TABLE auto_marked (
     entry_id  INTEGER PRIMARY KEY,
@@ -136,8 +137,9 @@ class ClusterResult:
     entry_ids: list
     headline_entry_id: int
     duplicate_ids: set
-    # Duplicates that are the same item listed twice (same URL, title and
-    # text as the article that stays unread); a subset of duplicate_ids
+    # Duplicates that are the same item listed twice (same URL and title,
+    # same or nearly the same text as a better-ranked copy that joined the
+    # same group); a subset of duplicate_ids
     copy_ids: set = field(default_factory=set)
 
 
@@ -328,6 +330,20 @@ class StoryStore:
             conn.executemany("INSERT OR REPLACE INTO auto_marked (entry_id, marked_at) "
                              "VALUES (?, ?)", [(i, marked_at) for i in entry_ids])
 
+    def refresh_auto_marked(self, fetched_ids: list) -> None:
+        """
+        Keep the records of marked entries that the last fetch returned.
+
+        Sets marked_at to now for them, so cleanup counts from the last
+        fetch rather than from marking: Miniflux does not clamp dates, and
+        an entry dated days ahead stays in the lookback window until then.
+        """
+        now = db_timestamp(datetime.now(timezone.utc))
+        with self._connect() as conn:
+            marked = {row['entry_id'] for row in conn.execute("SELECT entry_id FROM auto_marked")}
+            conn.executemany("UPDATE auto_marked SET marked_at = ? WHERE entry_id = ?",
+                             [(now, i) for i in marked.intersection(fetched_ids)])
+
     def auto_marked_ids(self) -> set:
         """IDs of entries that aRSSe marked as read before; they are never marked again."""
         with self._connect() as conn:
@@ -339,9 +355,11 @@ class StoryStore:
 
         Retention applies per article: a story that keeps running for weeks
         loses its old articles, and only then the story itself. Records of
-        entries marked read are kept for lookback_hours plus a day: an entry
-        marked at time T was published before T and has left the window
-        (and every fetch) by T + lookback_hours.
+        entries marked read are kept for lookback_hours plus a day after
+        the last fetch that returned the entry (see refresh_auto_marked).
+        The window only moves forward, so such an entry is not fetched
+        again; the extra day is a margin, e.g. for runs cut off at
+        max_entries.
         """
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=retention_days)

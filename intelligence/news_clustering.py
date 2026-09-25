@@ -161,11 +161,15 @@ class NewsClusterer:
             stats['articles_processed'] = len(entries)
             logger.info("Processing %d articles", len(entries))
 
-            clusters = self._cluster(entries)
+            # Read before clustering: an entry aRSSe marked read never stays
+            # in place of an unread copy (see _detect_duplicates)
+            auto_marked = self.store.auto_marked_ids()
+            clusters = self._cluster(entries, auto_marked)
             stats['clusters_found'] = len(clusters)
             stats['duplicates_detected'] = sum(len(c.duplicate_ids) for c in clusters)
 
             self.store.save_run(entries, clusters, fetch, self.config.web.min_sources)
+            self.store.refresh_auto_marked([e['id'] for e in entries])
             self.store.cleanup(self.config.storage.retention_days,
                                self.config.scheduling.lookback_hours)
 
@@ -186,8 +190,13 @@ class NewsClusterer:
         logger.info("Clustering cycle completed in %.2f seconds: %s", elapsed, stats)
         return stats
 
-    def _cluster(self, entries: list) -> list:
-        """Group entries into clusters and detect duplicates within each."""
+    def _cluster(self, entries: list, auto_marked: frozenset = frozenset()) -> list:
+        """
+        Group entries into clusters and detect duplicates within each.
+
+        auto_marked holds the IDs of entries that aRSSe marked read before;
+        see _detect_duplicates and _canonical_key.
+        """
         texts = [self._preprocess_entry(e) for e in entries]
         valid_indices = [i for i, t in enumerate(texts) if t]
         if len(valid_indices) < 2:
@@ -219,9 +228,10 @@ class NewsClusterer:
         clusters = []
         for member_indices in cluster_map.values():
             cluster_entries = [valid_entries[i] for i in member_indices]
-            duplicates, copies = self._detect_duplicates(cluster_entries)
+            duplicates, copies = self._detect_duplicates(cluster_entries, auto_marked)
             headline_idx = self._select_canonical(cluster_entries,
-                                                  list(range(len(cluster_entries))))
+                                                  list(range(len(cluster_entries))),
+                                                  auto_marked)
             headline_id = cluster_entries[headline_idx]['id']
             # The headline is shown as the story; it must never be marked read
             duplicates.discard(headline_id)
@@ -328,15 +338,18 @@ class NewsClusterer:
         title = _normalize(title)
         return ' '.join(part for part in (title, title, body) if part)
 
-    def _detect_duplicates(self, entries: list) -> tuple:
+    def _detect_duplicates(self, entries: list,
+                           auto_marked: frozenset = frozenset()) -> tuple:
         """
         Detect near-duplicate articles within a cluster.
 
         Two articles are duplicates if
 
         1. they are the same item twice: same URL (see _norm_url), same
-           title and the same text. Feeds sometimes list an item twice,
-           and Miniflux stores both copies;
+           title and the same or nearly the same text (equal, or a cosine
+           similarity of deduplication.threshold), in any feed and of any
+           length. Feeds sometimes list an item twice, and Miniflux stores
+           both copies;
         2. otherwise never if they come from the same feed: a feed does not
            copy itself, but its series share titles and boilerplate
            ('tagesschau' with the body '[ mehr ]');
@@ -355,6 +368,13 @@ class NewsClusterer:
         entry not yet assigned keeps its status and takes every unassigned
         entry that is a duplicate of it; the rest stays for the next group.
         Every duplicate has thus been compared with the article that stays.
+        Entries in auto_marked (marked read by aRSSe before) come last: once
+        Miniflux updates an article, the copy marked read may become the
+        longest one, and keeping it would mark the unread copy as well.
+
+        A duplicate is a copy (rule 1) if it is the same item as the seed
+        or as a better-ranked member of its group: two copies of one feed
+        may both join the group of an article from another feed.
 
         Returns:
             Tuple (duplicates, copies): IDs of all duplicates (not the
@@ -384,7 +404,9 @@ class NewsClusterer:
                 return False
             return long_enough[i] and long_enough[j] and similar(i, j)
 
-        order = sorted(range(len(entries)), key=lambda i: self._canonical_key(entries[i]),
+        order = sorted(range(len(entries)),
+                       key=lambda i: (entries[i]['id'] not in auto_marked,
+                                      self._canonical_key(entries[i], auto_marked)),
                        reverse=True)
         duplicates = set()
         copies = set()
@@ -393,15 +415,17 @@ class NewsClusterer:
             if seed in assigned:
                 continue
             assigned.add(seed)
+            group = [seed]
             for member in order:
                 if member in assigned:
                     continue
-                if same_item(member, seed):
-                    copies.add(entries[member]['id'])
-                elif not duplicate_of(member, seed):
+                if not same_item(member, seed) and not duplicate_of(member, seed):
                     continue
+                if any(same_item(member, kept) for kept in group):
+                    copies.add(entries[member]['id'])
                 duplicates.add(entries[member]['id'])
                 assigned.add(member)
+                group.append(member)
 
         return duplicates, copies
 
@@ -421,24 +445,26 @@ class NewsClusterer:
         except ValueError:  # no tokens left after stopword removal
             return None
 
-    def _select_canonical(self, entries: list, group_indices: list) -> int:
+    def _select_canonical(self, entries: list, group_indices: list,
+                          auto_marked: frozenset = frozenset()) -> int:
         """
         Select the canonical (best) entry from a group of entries.
 
         See _canonical_key.
         """
-        return max(group_indices, key=lambda i: self._canonical_key(entries[i]))
+        return max(group_indices, key=lambda i: self._canonical_key(entries[i], auto_marked))
 
-    def _canonical_key(self, entry: dict) -> tuple:
+    def _canonical_key(self, entry: dict, auto_marked: frozenset = frozenset()) -> tuple:
         """
         Rank an entry as canonical version: the higher, the better.
 
         Uses the configured strategy: longest (plain text, not HTML),
         source_priority or newest. Entries with a title always win over
         untitled ones (e.g. news ticker pages), so duplicate detection and
-        the story headline agree. On a tie the lowest (first stored) ID
-        wins: identical copies must not swap roles with the order in which
-        Miniflux returns them.
+        the story headline agree. Next, entries that aRSSe has not marked
+        read (not in auto_marked) win over marked ones. On a tie the lowest
+        (first stored) ID wins: identical copies must not swap roles with
+        the order in which Miniflux returns them.
         """
         strategy = self.config.deduplication.canonical_strategy
 
@@ -460,7 +486,7 @@ class NewsClusterer:
             key = entry['_text_len']
 
         has_title = bool((entry.get('title') or '').strip())
-        return (has_title, key, -entry['id'])
+        return (has_title, entry['id'] not in auto_marked, key, -entry['id'])
 
     def _mark_duplicates_read(self, entries: list, clusters: list) -> int:
         """

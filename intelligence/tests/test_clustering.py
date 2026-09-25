@@ -1,4 +1,5 @@
 import itertools
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -10,6 +11,7 @@ import pytest
 
 from conftest import BUDGET, FakeClient, make_entry, sample_entries
 from news_clustering import NewsClusterer, _norm_url
+from store import db_timestamp
 
 
 def run(config, store, entries):
@@ -468,3 +470,70 @@ def test_url_normalization():
     # Path case matters on most servers
     assert _norm_url(base.replace('inland', 'Inland')) != _norm_url(base)
     assert _norm_url('') == _norm_url(None) == ''
+
+
+def test_copy_marked_read_stays_the_duplicate_when_it_grows(config, store):
+    # Miniflux updates an entry's content in place: the copy aRSSe marked
+    # read gets a sentence more and becomes the longest version
+    copies = listed_twice(10, 42, 'https://www.tagesschau.de/ausland/amerika/'
+                                  'usa-medien-cnn-trump-102.html')
+    clusterer, client, _ = run(config, store, sample_entries() + copies)
+    assert client.marked == [([2, 42], 'read')]
+
+    for e in client.entries:
+        if e['id'] in (2, 42):
+            e['content'] = e['content'].replace('</p>', ' Die Regeln sollen sich ändern.</p>')
+    stats = clusterer.run_clustering_cycle()
+    assert stats['errors'] == 0
+    assert stats['marked_read'] == 0
+    assert {e['id']: e['status'] for e in client.entries if e['id'] in (1, 2, 10, 42)} \
+        == {1: 'unread', 2: 'read', 10: 'unread', 42: 'read'}
+    budget = next(s for s in store.top_stories(24, 50)
+                  if 2 in {a['id'] for a in s['articles']})
+    assert budget['headline']['id'] == 1
+
+
+def test_copy_joining_another_feeds_group_is_still_a_copy(config, store):
+    # Feed 1 lists an item twice; feed 2's longer version of the text is the
+    # seed. With min_sources 3 the story is hidden, but the second copy of
+    # feed 1 must still be marked (rule 1)
+    config.deduplication.threshold = 0.85
+    config.web.min_sources = 3
+    first = make_entry(10, 1, 'Bundestag beschließt Haushalt', BUDGET)
+    second = make_entry(42, 1, 'Bundestag beschließt Haushalt', BUDGET)
+    first['url'] = second['url'] = 'https://www.tagesschau.de/inland/haushalt-100.html'
+    second['published_at'] = first['published_at']
+    agency = make_entry(7, 2, 'Haushalt beschlossen', BUDGET + ' Der Bundesrat berät am Freitag.')
+    entries = [first, second, agency] + sample_entries()[3:]
+
+    clusterer = NewsClusterer(config, store, client=FakeClient([]))
+    cluster = clusters_by_member(clusterer._cluster([dict(e) for e in entries]))[10]
+    assert cluster.headline_entry_id == 7
+    assert cluster.duplicate_ids == {10, 42}
+    assert cluster.copy_ids == {42}
+
+    _, client, _ = run(config, store, entries)
+    assert client.marked == [([42], 'read')]
+
+
+def test_future_dated_duplicate_reset_by_user_stays_unread(config, store):
+    # Miniflux keeps an entry dated days ahead in the lookback window until
+    # its date has passed, long after lookback_hours + 24 h
+    entries = sample_entries()
+    for e in entries[:3]:
+        e['published_at'] = (datetime.now(timezone.utc) + timedelta(days=3)) \
+            .isoformat().replace('+00:00', 'Z')
+    clusterer, client, _ = run(config, store, entries)
+    assert client.marked == [([2], 'read')]
+    client.entries[1]['status'] = 'unread'
+
+    conn = sqlite3.connect(store.db_path)
+    with conn:
+        conn.execute("UPDATE auto_marked SET marked_at = ?",
+                     (db_timestamp(datetime.now(timezone.utc) - timedelta(hours=49)),))
+    conn.close()
+    stats = clusterer.run_clustering_cycle()
+    assert stats['errors'] == 0
+    assert stats['marked_read'] == 0
+    assert client.entries[1]['status'] == 'unread'
+    assert store.auto_marked_ids() == {2}

@@ -320,3 +320,17 @@ def test_v2_database_gets_auto_marked_table(tmp_path, monkeypatch):
     assert user_version(path) == len(MIGRATIONS)
     st.record_auto_marked([1])
     assert st.auto_marked_ids() == {1}
+
+
+def test_auto_marked_entries_still_fetched_are_kept(store):
+    store.record_auto_marked([2, 3])
+    old = db_timestamp(datetime.now(timezone.utc) - timedelta(hours=24 + 24, minutes=1))
+    conn = sqlite3.connect(store.db_path)
+    with conn:
+        conn.execute("UPDATE auto_marked SET marked_at = ?", (old,))
+    conn.close()
+    # 2 is still fetched (e.g. dated days ahead), 3 has left the window
+    store.refresh_auto_marked([1, 2, 5])
+    assert marked_rows(store.db_path)[3] == old
+    store.cleanup(7, lookback_hours=24)
+    assert store.auto_marked_ids() == {2}
