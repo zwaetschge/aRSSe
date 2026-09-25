@@ -6,7 +6,8 @@ variables and YAML configuration files.
 
 Precedence: defaults < /app/config.yaml (baked into the image, reference
 only) < /app/legacy/config.yaml (settings edited in ./intelligence/config.yaml
-by older versions, until they are moved) < /app/data/config.yaml (optional
+by older versions, until they are moved; ignored where it is the unchanged
+reference of any version) < /app/data/config.yaml (optional
 user settings next to the story database) < environment variables. Each
 file only changes the settings it names. Empty environment variables are
 ignored, so docker-compose can pass variables through without clobbering
@@ -16,6 +17,7 @@ values from the files.
 import copy
 import dataclasses
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -37,6 +39,10 @@ USER_CONFIG_PATH = '/app/data/config.yaml'
 # docker-compose.yml: older versions mounted it as /app/config.yaml and the
 # README said to edit it. Its edits still apply until they are moved.
 LEGACY_CONFIG_PATH = '/app/legacy/config.yaml'
+# Every config.yaml ever committed, next to config.yaml (image and
+# checkout): an old or newer unchanged reference is not a user edit.
+# Regenerate with scripts/config-history.py after changing config.yaml.
+CONFIG_HISTORY_NAME = 'config.history.json'
 # Commented template copied to USER_CONFIG_PATH when it is missing
 USER_CONFIG_STUB = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 'config.stub.yaml')
@@ -264,10 +270,11 @@ def load_config(config_path: Optional[str] = None,
             config_path that differs from the defaults is reported, since
             it was edited in place (see _warn_edited_reference).
         legacy_config_path: Path to the checkout's intelligence/config.yaml
-            (LEGACY_CONFIG_PATH in the service). Where it differs from
-            config_path, it applies between config_path and the user file,
-            with a warning naming the settings to move (see
-            _apply_legacy_config). Unreadable or invalid files are skipped.
+            (LEGACY_CONFIG_PATH in the service). Settings edited there (it
+            matches no reference ever shipped, see _read_legacy_edits)
+            apply between config_path and the user file, with a warning
+            naming them. Unreadable or invalid files, and edits that would
+            make the configuration invalid, are skipped.
 
     Returns:
         Config object with all settings.
@@ -282,20 +289,18 @@ def load_config(config_path: Optional[str] = None,
         _apply_yaml_config(config, base)
         if user_config_path is not None:
             _warn_edited_reference(config_path, config, user_config_path)
-    legacy = _read_legacy_yaml(legacy_config_path, base)
+    edits = _read_legacy_edits(legacy_config_path, config_path, base)
+    with_legacy = _with_legacy_edits(config, edits, legacy_config_path)
     user = _read_yaml(user_config_path)
-    if legacy:
-        config = _apply_legacy_config(config, legacy, legacy_config_path,
-                                      user, user_config_path)
-    elif user:
-        _apply_yaml_config(config, user)
     if user:
+        _apply_yaml_config(config, user)
         logger.info("Using settings from %s", user_config_path)
 
     _apply_env_config(config)
-    _validate(config)
-
-    return config
+    if with_legacy is None:
+        _validate(config)
+        return config
+    return _finish_legacy(config, with_legacy, user, legacy_config_path, user_config_path)
 
 
 def _read_yaml(path: Optional[str]) -> Optional[dict]:
@@ -352,9 +357,78 @@ def _warn_edited_reference(path: str, config: Config, user_config_path: str) -> 
                        path, ', '.join(changed), user_config_path)
 
 
-def _read_legacy_yaml(path: Optional[str], base: Optional[dict]) -> Optional[dict]:
+def flatten_reference(data: Optional[dict]) -> dict:
     """
-    Read the checkout's old config.yaml; None if missing or like the reference.
+    Dotted setting name -> value for a parsed config.yaml.
+
+    Descends into sections and into web.auth; other values stay whole,
+    since a list or table (e.g. source_scores) replaces the default as a
+    whole. Values pass through JSON, so a file compares equal to its
+    entry in config.history.json.
+    """
+    flat = {}
+    for section, values in (data or {}).items():
+        target = getattr(Config(), str(section), None)
+        if not isinstance(values, dict):
+            flat[str(section)] = values
+            continue
+        for key, value in values.items():
+            name = f'{section}.{key}'
+            sub = getattr(target, str(key), None) if dataclasses.is_dataclass(target) else None
+            if isinstance(value, dict) and dataclasses.is_dataclass(sub):
+                flat.update({f'{name}.{k}': v for k, v in value.items()})
+            else:
+                flat[name] = value
+    return json.loads(json.dumps(flat, default=str))
+
+
+def _unflatten(flat: dict) -> dict:
+    """Nested YAML sections for dotted setting names (see flatten_reference)."""
+    nested = {}
+    for name, value in flat.items():
+        *path, key = name.split('.')
+        node = nested
+        for part in path:
+            node = node.setdefault(part, {})
+        node[key] = value
+    return nested
+
+
+def _known_references(*config_paths: Optional[str]) -> list:
+    """
+    Every config.yaml ever shipped, flattened (config.history.json).
+
+    Read from the directories of the given files: the image knows the
+    references up to its build, a newer checkout also its own. Missing or
+    broken files are skipped.
+    """
+    references = []
+    for path in config_paths:
+        if not path:
+            continue
+        history = os.path.join(os.path.dirname(path), CONFIG_HISTORY_NAME)
+        try:
+            with open(history, 'r', encoding='utf-8') as f:
+                entries = json.load(f)['references']
+            references.extend(entry['settings'] for entry in entries
+                              if isinstance(entry.get('settings'), dict))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            logger.debug("Ignoring %s: %s", history, e)
+    return references
+
+
+def _read_legacy_edits(path: Optional[str], config_path: Optional[str],
+                       base: Optional[dict]) -> Optional[dict]:
+    """
+    Settings edited in the checkout's old config.yaml; None if there are none.
+
+    The checkout and the image are often different versions ('git pull'
+    follows the main branch, ARSSE_VERSION=latest the last release), so
+    the file counts as edited only if it matches no reference ever shipped.
+    Then only the settings that differ from the closest reference are the
+    edits, not the defaults of another version.
 
     Never raises: the file is only read to carry old edits over, so an
     unreadable one (e.g. a checkout the service user cannot read) is
@@ -363,17 +437,40 @@ def _read_legacy_yaml(path: Optional[str], base: Optional[dict]) -> Optional[dic
     if not path or not os.path.isfile(path):
         return None
     try:
-        legacy = _read_yaml(path)
+        legacy = flatten_reference(_read_yaml(path))
     except ConfigError as e:
         logger.warning("Ignoring the old settings file: %s", e)
         return None
-    if not legacy or legacy == (base or {}):
+    references = [flatten_reference(base)] + _known_references(config_path, path)
+    if not legacy or legacy in references:
+        if legacy and legacy != references[0]:
+            logger.debug("%s is the unchanged reference of another version; not used", path)
         return None
-    return legacy
+
+    def differences(reference):
+        return [name for name, value in legacy.items()
+                if name not in reference or reference[name] != value]
+    # First the image's own reference: on a tie it is the likelier origin
+    closest = min(references, key=lambda reference: len(differences(reference)))
+    return _unflatten({name: legacy[name] for name in differences(closest)})
 
 
-def _apply_legacy_config(config: Config, legacy: dict, legacy_path: str,
-                         user: Optional[dict], user_config_path: Optional[str]) -> Config:
+def _with_legacy_edits(config: Config, edits: Optional[dict],
+                       legacy_path: Optional[str]) -> Optional[Config]:
+    """A copy of config with the old file's edits applied; None without edits."""
+    if not edits:
+        return None
+    with_legacy = copy.deepcopy(config)
+    try:
+        _apply_yaml_config(with_legacy, edits)
+    except ConfigError as e:
+        logger.warning("Ignoring the old settings file %s: %s", legacy_path, e)
+        return None
+    return with_legacy
+
+
+def _finish_legacy(config: Config, with_legacy: Config, user: Optional[dict],
+                   legacy_path: str, user_config_path: Optional[str]) -> Config:
     """
     Apply edits of the checkout's old config.yaml below the user file.
 
@@ -382,33 +479,63 @@ def _apply_legacy_config(config: Config, legacy: dict, legacy_path: str,
     it, so without this layer such edits would be dropped silently on the
     first update. Settings the user file already sets win; the others
     still apply and are named in a warning with the steps to move them.
+    Edits that make the configuration invalid are skipped: the layer
+    never stops the service.
+
+    Args:
+        config: The configuration without the old file (user file and
+            environment applied, not yet validated).
+        with_legacy: The reference configuration with the old file's edits.
 
     Returns:
-        The configuration with the old file and the user file applied.
+        The validated configuration with the old file and the user file
+        applied.
+
+    Raises:
+        ConfigError: If the configuration is invalid without the old file
+            and with it.
     """
-    with_legacy = copy.deepcopy(config)
-    _apply_yaml_config(with_legacy, legacy)
-    if user:
-        _apply_yaml_config(config, user)
-        # Same file again: its warnings were just logged
+    target = user_config_path or USER_CONFIG_PATH
+    try:
+        _validate(config)
+        error = None
+    except ConfigError as e:
+        error = e
+    try:
+        # Same files and variables again: their warnings were just logged
         with _quiet(logger):
-            _apply_yaml_config(with_legacy, user)
+            if user:
+                _apply_yaml_config(with_legacy, user)
+            _apply_env_config(with_legacy)
+            _validate(with_legacy)
+    except ConfigError as e:
+        if error:
+            raise error from None
+        logger.warning("Ignoring %s (./intelligence/config.yaml of your checkout): with its "
+                       "settings the configuration is invalid (%s). If you edited it, fix "
+                       "the value in %s instead; otherwise the checkout and the image are "
+                       "different versions ('git pull' and ARSSE_VERSION in .env).",
+                       legacy_path, e, target)
+        return config
     without = _flatten(config)
     pending = [name for name, value in _flatten(with_legacy).items()
                if value != without[name]]
     if pending:
         logger.warning("%s (./intelligence/config.yaml of your checkout, mounted by "
-                       "docker-compose.yml) differs from the shipped reference: %s. "
-                       "These settings still apply, but only to ease the move, and a "
-                       "later version will ignore that file. Copy them to %s (on the "
-                       "server: DATA_PATH/intelligence/config.yaml), then undo the edit "
-                       "with 'git checkout -- intelligence/config.yaml' (README, 'Updates').",
-                       legacy_path, ', '.join(pending), user_config_path or USER_CONFIG_PATH)
+                       "docker-compose.yml) differs from every shipped version of the reference "
+                       "in: %s. These settings still apply, but only to ease the move, and "
+                       "a later version will ignore that file. If you edited them, copy them "
+                       "to %s (on the server: DATA_PATH/intelligence/config.yaml), then undo "
+                       "the edit with 'git checkout -- intelligence/config.yaml' (README, "
+                       "'Updates'). If 'git status' shows no edit, the checkout is newer than "
+                       "the image: update both ('git pull', ARSSE_VERSION in .env, "
+                       "'docker compose pull').",
+                       legacy_path, ', '.join(pending), target)
         return with_legacy
-    logger.info("%s (./intelligence/config.yaml of your checkout) differs from the shipped "
-                "reference but changes nothing that %s does not set. Undo the edit with "
+    logger.info("%s (./intelligence/config.yaml of your checkout) was edited but changes "
+                "nothing that %s does not set. Undo the edit with "
                 "'git checkout -- intelligence/config.yaml' so 'git pull' keeps working.",
-                legacy_path, user_config_path or USER_CONFIG_PATH)
+                legacy_path, target)
     return config
 
 

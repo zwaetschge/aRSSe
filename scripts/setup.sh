@@ -418,8 +418,9 @@ prepare_user_config() {
             print_warning "  Referenz zurücksetzen, sonst blockiert sie 'git pull':"
             print_warning "  git checkout -- intelligence/config.yaml"
         else
-            print_warning "intelligence/config.yaml ist geändert, gilt aber nur noch in selbst gebauten"
-            print_warning "  Images: Änderungen bitte nach $target übernehmen und dann"
+            print_warning "intelligence/config.yaml ist geändert. Einstellungen, die in $target"
+            print_warning "  fehlen, gelten vorerst weiter (das Log nennt sie), aber nur für den Umstieg:"
+            print_warning "  bitte nach $target übernehmen und dann"
             print_warning "  git checkout -- intelligence/config.yaml"
             return 0
         fi

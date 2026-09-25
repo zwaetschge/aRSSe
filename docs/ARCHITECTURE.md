@@ -477,12 +477,22 @@ im Log und verweist auf die eigene Datei.
 Ältere Versionen banden `./intelligence/config.yaml` als `/app/config.yaml` ein, und das
 README empfahl, sie zu ändern. Damit solche Änderungen mit dem veröffentlichten Image
 nicht stillschweigend verschwinden, bindet `docker-compose.yml` `./intelligence` nur
-lesend als `/app/legacy` ein. Weicht `/app/legacy/config.yaml` von der Referenz ab, gilt
-sie als Schicht zwischen Referenz und eigener Datei (`_apply_legacy_config`): Was die
-eigene Datei setzt, gewinnt; die übrigen abweichenden Einstellungen gelten weiter und
-stehen bei jedem Start in einer Warnung mit den Schritten zum Umzug. Fehlt die Datei,
-ist sie unverändert oder nicht lesbar (Rechte, kaputtes YAML), wird sie übersprungen –
-der Dienst startet immer. `scripts/backup.sh`, `evaluate.py` und
+lesend als `/app/legacy` ein. Checkout und Image sind oft verschiedene Versionen
+(`git pull` folgt dem Hauptzweig, `ARSSE_VERSION=latest` der letzten Release-Version),
+daher gilt `/app/legacy/config.yaml` nur als geändert, wenn sie keiner jemals
+veröffentlichten Fassung der Referenz entspricht. Diese Fassungen stehen flach
+(`flatten_reference`) in `config.history.json` – im Image neben `/app/config.yaml`,
+und ein neuerer Checkout bringt seine eigene mit (`/app/legacy/config.history.json`).
+`scripts/config-history.py` erzeugt die Datei aus der Git-Geschichte;
+`test_current_reference_is_in_the_history` schlägt fehl, solange eine geänderte
+`config.yaml` dort fehlt. Als Änderungen zählen nur die Abweichungen von der ähnlichsten
+Fassung (`_read_legacy_edits`), nicht die Standardwerte einer anderen Version. Sie gelten
+als Schicht zwischen Referenz und eigener Datei (`_finish_legacy`): Was die eigene Datei
+setzt, gewinnt; die übrigen Änderungen gelten weiter und stehen bei jedem Start in einer
+Warnung mit den Schritten zum Umzug. Fehlt die Datei, ist sie eine unveränderte Fassung,
+nicht lesbar (Rechte, kaputtes YAML) oder wäre die Konfiguration mit ihren Werten
+ungültig, wird sie übersprungen – Fehler in der eigenen Datei oder `.env` stoppen den
+Dienst weiterhin, die alte Datei nie. `scripts/backup.sh`, `evaluate.py` und
 `eval/export_corpus.py` laden die Einstellungen genauso.
 
 #### Fehler und Health Check

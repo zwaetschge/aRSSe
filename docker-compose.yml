@@ -113,8 +113,9 @@ services:
   # ============================================
   intelligence:
     # Veröffentlichtes Image (amd64 und arm64): 'docker compose pull'
-    # aktualisiert es. Gibt es das Image (noch) nicht, baut Compose es aus
-    # ./intelligence; 'docker compose up -d --build' baut immer den lokalen Code.
+    # aktualisiert es. Gibt es das Image (noch) nicht, baut Compose es einmal
+    # aus ./intelligence und verwendet es danach weiter; 'docker compose up -d
+    # --build' baut immer den lokalen Code (so auch Updates ohne Release).
     image: ghcr.io/zwaetschge/arsse-intelligence:${ARSSE_VERSION:-latest}
     build:
       context: ./intelligence

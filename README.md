@@ -50,7 +50,7 @@ Setzen Sie `BASE_URL` in `.env` auf die Adresse, unter der Ihre Geräte Miniflux
 docker compose up -d
 ```
 
-Den Intelligence Layer lädt Compose als fertiges Image (`ghcr.io/zwaetschge/arsse-intelligence`, für amd64 und arm64); gibt es das Image nicht, baut Compose es aus `./intelligence`. `docker compose up -d --build` baut immer den lokalen Code. Die Version wählt `ARSSE_VERSION` in `.env`: `latest` (Standard, die letzte Release-Version), eine feste Version wie `1.0` oder `edge` (jeder Stand des Hauptzweigs).
+Den Intelligence Layer lädt Compose als fertiges Image (`ghcr.io/zwaetschge/arsse-intelligence`, für amd64 und arm64); gibt es das Image nicht, baut Compose es aus `./intelligence` – nur beim ersten Mal, denn das gebaute Image trägt denselben Namen. `docker compose up -d --build` baut immer den lokalen Code (so auch Updates ohne Release-Version). Die Version wählt `ARSSE_VERSION` in `.env`: `latest` (Standard, die letzte Release-Version), eine feste Version wie `1.0` oder `edge` (jeder Stand des Hauptzweigs).
 
 Das Datenverzeichnis des Intelligence Layers (`${DATA_PATH}/intelligence`) muss nicht vorab angelegt werden: Der Container startet als root, übergibt es an `PUID:PGID` (Standard 1000:1000, Unraid 99:100) und läuft danach ohne Root-Rechte.
 
@@ -161,7 +161,7 @@ git pull
 
 Danach in der neuen Datei nur die geänderten Einstellungen stehen lassen, dann gelten künftige Verbesserungen der Standardwerte auch für Sie. `scripts/setup.sh` übernimmt eine geänderte `intelligence/config.yaml` automatisch, solange die eigene Datei fehlt oder noch die unveränderte Vorlage ist.
 
-Ist die Änderung trotzdem noch in `intelligence/config.yaml` (z.B. nach `git stash` und `git stash pop` oder als eigener Commit), geht sie nicht verloren: `docker-compose.yml` bindet `./intelligence` nur lesend als `/app/legacy` ein, und Einstellungen, die dort anders sind als in der Referenz und in Ihrer eigenen Datei fehlen, gelten vorerst weiter. Das Log nennt sie dann bei jedem Start (`… differs from the shipped reference: clustering.threshold …`) – ziehen Sie sie wie oben um; eine spätere Version liest die Datei nicht mehr. Dasselbe gilt für ein selbst gebautes Image mit geänderter Referenz.
+Ist die Änderung trotzdem noch in `intelligence/config.yaml` (z.B. nach `git stash` und `git stash pop` oder als eigener Commit), geht sie nicht verloren: `docker-compose.yml` bindet `./intelligence` nur lesend als `/app/legacy` ein, und Einstellungen, die dort geändert sind und in Ihrer eigenen Datei fehlen, gelten vorerst weiter. Das Log nennt sie dann bei jedem Start (`… differs from every shipped version of the reference in: clustering.threshold …`) – ziehen Sie sie wie oben um; eine spätere Version liest die Datei nicht mehr. Dasselbe gilt für ein selbst gebautes Image mit geänderter Referenz. Als geändert gilt die Datei nur, wenn sie keiner jemals veröffentlichten Fassung der Referenz entspricht (`intelligence/config.history.json`), und dann zählen nur die Abweichungen von der ähnlichsten Fassung: Dass Checkout und Image verschiedene Versionen sind (`git pull` folgt dem Hauptzweig, `ARSSE_VERSION=latest` der letzten Release-Version), ist keine Änderung. Einstellungen, mit denen die Konfiguration ungültig wäre, lässt der Dienst mit einer Warnung weg.
 
 Anpassungen an `docker-compose.yml` selbst (Ports, Speicherlimit, zusätzliche Mounts) gehören in eine `docker-compose.override.yml` daneben: Compose liest sie automatisch, und `git pull` lässt sie in Ruhe. Beispiel:
 
@@ -220,6 +220,7 @@ aRSSe/
 │   ├── config.py           # Konfigurationsmodul
 │   ├── config.yaml         # Referenz aller Einstellungen (im Image, nicht ändern)
 │   ├── config.stub.yaml    # Vorlage für DATA_PATH/intelligence/config.yaml
+│   ├── config.history.json # alle Fassungen von config.yaml (scripts/config-history.py)
 │   └── tests/              # pytest-Suite
 ├── css/
 │   ├── eink-theme.css      # E-Ink-Theme für Miniflux
@@ -484,14 +485,14 @@ docker compose pull    # neue Images (Miniflux, Intelligence Layer)
 docker compose up -d
 ```
 
-Solange es noch keine Release-Version gibt, meldet `docker compose pull` das Intelligence-Image als nicht gefunden; `docker compose up -d` baut es dann aus dem lokalen Code (`--build` erzwingt das immer).
+Solange es noch keine Release-Version gibt (oder Sie das Image selbst bauen), meldet `docker compose pull` das Intelligence-Image als nicht gefunden. Beim ersten Mal baut `docker compose up -d` es dann aus dem lokalen Code; danach findet Compose dieses lokal gebaute Image und baut es nicht neu. Aktualisieren Sie in diesem Fall mit `docker compose up -d --build`, oder stellen Sie `ARSSE_VERSION=edge` ein, sobald der Hauptzweig veröffentlicht wird.
 
 **Erstes Update von einer älteren Version** (ohne `scripts/backup.sh` und ohne `${DATA_PATH}/intelligence/config.yaml`):
 
 1. Wer `intelligence/config.yaml` selbst geändert hat, übernimmt die Änderungen zuerst wie unter [Konfiguration](#konfiguration) beschrieben (sonst verweigert `git pull` das Update).
 2. `git pull`, dann `scripts/backup.sh` – das Skript sichert auch den noch laufenden alten Container.
 3. `scripts/setup.sh` ausführen (legt die eigene `config.yaml` an und übernimmt übrig gebliebene Änderungen), dann `docker compose pull` und `docker compose up -d`.
-4. Im Log (`docker compose logs intelligence`) prüfen, ob noch Einstellungen aus `./intelligence/config.yaml` genannt werden (`differs from the shipped reference`); sie gelten vorerst weiter, gehören aber nach `${DATA_PATH}/intelligence/config.yaml`.
+4. Im Log (`docker compose logs intelligence`) prüfen, ob noch Einstellungen aus `./intelligence/config.yaml` genannt werden (`differs from every shipped version of the reference`); sie gelten vorerst weiter, gehören aber nach `${DATA_PATH}/intelligence/config.yaml`.
 
 ### PostgreSQL-Hauptversion wechseln
 
@@ -555,7 +556,7 @@ pip-compile --generate-hashes --output-file=requirements.txt requirements.in
 
 Dependabot schlägt wöchentlich Updates für Python-Pakete, Basis-Image, Miniflux und die GitHub Actions vor; jeder Vorschlag durchläuft alle Tests. PostgreSQL verfolgt er nicht, weil `docker-compose.yml` die Version über `POSTGRES_MAJOR` wählt (Variablen im Image-Namen überspringt Dependabot): Kleine Updates bringt `docker compose pull` innerhalb der Hauptversion, den Wechsel der Hauptversion machen Sie von Hand (siehe [Backup und Updates](#backup-und-updates)). Dasselbe gilt für das eigene Image (`ARSSE_VERSION`).
 
-**Release:** Jeder Push auf den Hauptzweig veröffentlicht nach bestandenen Tests `ghcr.io/zwaetschge/arsse-intelligence:edge` und `:sha-<commit>`, ein Tag `vX.Y.Z` zusätzlich `:X.Y.Z`, `:X.Y` und `:latest` (`.github/workflows/release.yml`, amd64 und arm64). Pull Requests veröffentlichen nie etwas. Nach der ersten Veröffentlichung ist das Paket in der GitHub Container Registry noch privat: unter *Package settings* einmalig auf *Public* stellen, sonst scheitern `docker compose pull` und das Unraid-Template ohne Anmeldung.
+**Release:** Jeder Push auf den Hauptzweig veröffentlicht nach bestandenen Tests `ghcr.io/zwaetschge/arsse-intelligence:edge` und `:sha-<commit>`, ein Tag `vX.Y.Z` zusätzlich `:X.Y.Z`, `:X.Y` und `:latest` (`.github/workflows/release.yml`, amd64 und arm64). Pull Requests veröffentlichen nie etwas. `:latest` gibt es erst mit dem ersten Tag: Nach dem Zusammenführen einmal `git tag v1.0.0 && git push origin v1.0.0` ausführen, damit `docker compose pull` und das Unraid-Template ein Image finden. Nach der ersten Veröffentlichung ist das Paket in der GitHub Container Registry noch privat: unter *Package settings* einmalig auf *Public* stellen, sonst scheitern `docker compose pull` und das Unraid-Template ohne Anmeldung.
 
 Integrationstest mit echtem Miniflux (braucht Docker, kollidiert nicht mit einem laufenden Stack: eigene Namen, Ports und ein eigenes Image `arsse-it-intelligence:test`, immer aus dem lokalen Code gebaut):
 

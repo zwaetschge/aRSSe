@@ -277,7 +277,7 @@ grep -q "git checkout -- intelligence/config.yaml" <<< "$OUT" || fail "Hinweis a
 echo "web: {min_sources: 5}" > "$PROJ/$USER_CONFIG_PATH_REL"
 run_setup --no-start
 grep -q "min_sources: 5" "$PROJ/$USER_CONFIG_PATH_REL" || fail "eigene Einstellungen überschrieben"
-grep -q "gilt aber nur noch in selbst gebauten" <<< "$OUT" || fail "Hinweis auf doppelte Einstellungen fehlt"
+grep -q "gelten vorerst weiter (das Log nennt sie)" <<< "$OUT" || fail "Hinweis auf doppelte Einstellungen fehlt"
 
 step "--yes startet Datenbank und Miniflux"
 new_project start

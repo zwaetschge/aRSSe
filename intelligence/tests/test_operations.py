@@ -1,7 +1,9 @@
 """Operations: config layering, visible errors, health states, logs, build pins."""
 
+import dataclasses
 import hashlib
 import io
+import json
 import logging.handlers
 import os
 import re
@@ -162,7 +164,8 @@ def test_old_checkout_edits_still_apply_with_a_migration_hint(tmp_path, clean_en
     with caplog.at_level('WARNING', logger='arsse-intelligence'):
         cfg = load_config(SHIPPED, user, legacy)
     assert (cfg.clustering.threshold, cfg.deduplication.duplicate_action) == (0.8, 'none')
-    assert 'differs from the shipped reference: deduplication.duplicate_action.' in caplog.text
+    assert 'shipped version of the reference in: deduplication.duplicate_action.' \
+        in caplog.text
 
     # Moved completely: no warning any more, and the environment still wins
     write(tmp_path / 'data' / 'config.yaml',
@@ -190,6 +193,92 @@ def test_unchanged_missing_or_unreadable_checkout_file_is_ignored(tmp_path, clea
         cfg = load_config(SHIPPED, user, broken)
     assert cfg.web.min_sources == 2
     assert 'Ignoring the old settings file' in caplog.text
+
+
+def shipped_references():
+    """The flattened references in config.history.json, oldest first."""
+    history = json.loads((HERE / config_module.CONFIG_HISTORY_NAME).read_text(encoding='utf-8'))
+    return [entry['settings'] for entry in history['references']]
+
+
+def checkout_of(tmp_path, settings, history=None):
+    """./intelligence of another version: config.yaml and its config.history.json."""
+    (tmp_path / 'legacy').mkdir(exist_ok=True)
+    if history is not None:
+        write(tmp_path / 'legacy' / config_module.CONFIG_HISTORY_NAME,
+              json.dumps({'references': [{'commit': 'x', 'settings': s} for s in history]}))
+    return write(tmp_path / 'legacy' / 'config.yaml',
+                 yaml.safe_dump(config_module._unflatten(settings)))
+
+
+def test_current_reference_is_in_the_history():
+    # Otherwise a checkout of this version would count as edited in older or
+    # newer images: run scripts/config-history.py after changing config.yaml
+    current = config_module.flatten_reference(config_module._read_yaml(SHIPPED))
+    assert current in shipped_references()
+    assert 'clustering.threshold' in current and 'web.auth.mode' in current
+
+
+def test_unchanged_reference_of_another_version_is_ignored(tmp_path, clean_env, caplog):
+    # 'git pull' follows the main branch, ARSSE_VERSION=latest the last
+    # release: checkout and image differ without any edit
+    user = write(tmp_path / 'config.yaml', (HERE / 'config.stub.yaml').read_text('utf-8'))
+    image_only = dataclasses.asdict(load_config(SHIPPED, user))
+    current = config_module.flatten_reference(config_module._read_yaml(SHIPPED))
+
+    older = next(ref for ref in shipped_references()
+                 if ref.get('web.max_stories', 100) != current['web.max_stories'])
+    newer = dict(current, **{'web.min_sources': 3, 'clustering.threshold': 0.72,
+                             'clustering.new_option': True,
+                             'deduplication.canonical_strategy': 'cluster_centroid'})
+    for settings, history in ((older, None), (newer, shipped_references() + [newer])):
+        legacy = checkout_of(tmp_path, settings, history)
+        caplog.clear()
+        with caplog.at_level('INFO', logger='arsse-intelligence'):
+            cfg = load_config(SHIPPED, user, legacy)
+        assert dataclasses.asdict(cfg) == image_only
+        assert legacy not in caplog.text and 'WARNING' not in caplog.text
+
+
+def test_edit_of_another_version_applies_only_the_edit(tmp_path, clean_env, caplog):
+    user = str(tmp_path / 'data' / 'config.yaml')
+    older = dict(shipped_references()[0], **{'web.min_sources': 4})
+    current = config_module.flatten_reference(config_module._read_yaml(SHIPPED))
+    newer = dict(current, **{'web.max_stories': 70, 'clustering.new_option': True})
+    for settings, history in ((older, None), (dict(newer, **{'web.min_sources': 4}),
+                                              shipped_references() + [newer])):
+        legacy = checkout_of(tmp_path, settings, history)
+        caplog.clear()
+        with caplog.at_level('WARNING', logger='arsse-intelligence'):
+            cfg = load_config(SHIPPED, user, legacy)
+        # The edit applies; the other version's defaults do not
+        assert (cfg.web.min_sources, cfg.web.max_stories) == (4, 100)
+        assert 'reference in: web.min_sources. These' in caplog.text
+        assert 'unknown config option' not in caplog.text
+
+
+def test_checkout_values_never_stop_the_service(tmp_path, clean_env, caplog):
+    # A newer checkout without history (or a bad edit) with a value this
+    # image rejects: the service starts without the checkout's settings
+    user = str(tmp_path / 'data' / 'config.yaml')
+    legacy = edited_checkout(tmp_path, ('canonical_strategy: "longest"',
+                                        'canonical_strategy: "cluster_centroid"'),
+                             ('min_sources: 2', 'min_sources: 3'))
+    with caplog.at_level('WARNING', logger='arsse-intelligence'):
+        cfg = load_config(SHIPPED, user, legacy)
+    assert (cfg.deduplication.canonical_strategy, cfg.web.min_sources) == ('longest', 2)
+    assert 'the configuration is invalid' in caplog.text and 'cluster_centroid' in caplog.text
+
+    legacy = edited_checkout(tmp_path, ('auth:\n', 'auth: "basic"\n  old_auth:\n'))
+    with caplog.at_level('WARNING', logger='arsse-intelligence'):
+        assert load_config(SHIPPED, user, legacy).web.auth.mode == 'none'
+    assert 'Ignoring the old settings file' in caplog.text
+
+    # Errors of the user's own settings still stop it, with or without the checkout
+    (tmp_path / 'data').mkdir()
+    write(tmp_path / 'data' / 'config.yaml', 'web:\n  min_sources: 0\n')
+    with pytest.raises(ConfigError, match='web.min_sources'):
+        load_config(SHIPPED, user, legacy)
 
 
 def test_compose_mounts_the_checkout_for_the_migration_hint():
