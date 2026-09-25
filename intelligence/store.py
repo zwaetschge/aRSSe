@@ -254,7 +254,8 @@ class StoryStore:
             conn.close()
 
     def save_run(self, entries: list, clusters: list,
-                 fetch: Optional[FetchResult] = None, min_sources: int = 1) -> dict:
+                 fetch: Optional[FetchResult] = None, min_sources: int = 1,
+                 sticky_headline: bool = True) -> dict:
         """
         Persist the result of a clustering run.
 
@@ -266,10 +267,11 @@ class StoryStore:
                 articles that Miniflux no longer returns are removed.
             min_sources: Feeds a story needs to be shown (web.min_sources);
                 story IDs that were visible are kept in preference.
-
-        A story keeps its headline while that article is still a member,
-        not noise (cluster.noise_ids) and not a duplicate, even if the
-        cluster picked another one (see _sticky_headline).
+            sticky_headline: A story keeps its headline while that article
+                is still a member, not noise (cluster.noise_ids) and not a
+                duplicate, even if the cluster picked another one (see
+                _sticky_headline). Only meant for canonical_strategy
+                'longest'; with False the cluster's pick is stored.
 
         Returns:
             Mapping of cluster index to the story ID it was stored under.
@@ -326,7 +328,10 @@ class StoryStore:
                        ON CONFLICT(id) DO UPDATE SET
                            headline_entry_id = excluded.headline_entry_id,
                            last_seen = excluded.last_seen""",
-                    (story_id, _sticky_headline(cluster, previous.get(story_id)), now, now),
+                    (story_id,
+                     _sticky_headline(cluster, previous.get(story_id)) if sticky_headline
+                     else cluster.headline_entry_id,
+                     now, now),
                 )
                 conn.executemany(
                     "INSERT INTO story_entries (entry_id, story_id, is_duplicate) "
@@ -602,7 +607,10 @@ def _sticky_headline(cluster: ClusterResult, story: Optional[_PreviousStory]) ->
     The previous headline stays while it is still a member that may head
     the story (not in noise_ids) and is not a duplicate (those may be
     marked read). A headline that changes with every longer article
-    forces a full redraw on E-Ink and makes the story look new.
+    forces a full redraw on E-Ink and makes the story look new. Only for
+    canonical_strategy 'longest': 'newest' and 'source_priority' ask for
+    the newest report or the best source on top, which a sticky headline
+    would never let through.
     """
     old = story.headline_entry_id if story else None
     if (old is not None and old != cluster.headline_entry_id

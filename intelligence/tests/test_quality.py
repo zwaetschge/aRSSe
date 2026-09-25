@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from sklearn.metrics.pairwise import cosine_similarity
 
 from conftest import BUDGET, FakeClient, make_entry, sample_entries
@@ -129,6 +130,32 @@ def test_headline_stays_when_a_longer_article_joins(config, store):
 
     clusterer.run_clustering_cycle()
     assert headline_of(store, 7) == first
+
+
+@pytest.mark.parametrize('strategy', ['newest', 'source_priority'])
+def test_headline_follows_newest_and_source_priority(config, store, strategy):
+    # Only 'longest' keeps the headline: with these strategies the user
+    # asked for the newest report or the best source on top
+    config.deduplication.canonical_strategy = strategy
+    config.deduplication.duplicate_action = 'none'
+    config.deduplication.source_scores = {'zeit.de': 95, 'spiegel.de': 90, 'heise.de': 80}
+    entries = [make_entry(1, 4, 'Bundestag beschließt Haushalt', BUDGET, hours_ago=5),
+               make_entry(2, 2, 'Haushalt: Bundestag stimmt zu',
+                          'Nach langer Debatte stimmt der Bundestag dem Haushalt zu. Die '
+                          'Schuldenbremse bleibt, die Opposition kritisiert die Kürzungen '
+                          'bei der Bildung.', hours_ago=4)] + sample_entries()[3:5]
+    client = FakeClient(entries)
+    clusterer = NewsClusterer(config, store, client=client)
+    clusterer.run_clustering_cycle()
+    assert headline_of(store, 1) == 2
+
+    # Newer and from the best source
+    client.entries.append(make_entry(
+        7, 3, 'Haushalt 2027 beschlossen: Opposition kritisiert Kürzungen',
+        'Der Bundestag hat den Haushalt beschlossen. Die Opposition kritisiert Kürzungen '
+        'bei Bildung und Infrastruktur, die Schuldenbremse bleibt.', hours_ago=0.2))
+    clusterer.run_clustering_cycle()
+    assert headline_of(store, 1) == 7
 
 
 def test_noise_headline_is_replaced_when_a_real_article_joins(config, store):

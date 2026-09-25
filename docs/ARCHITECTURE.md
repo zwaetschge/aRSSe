@@ -207,8 +207,11 @@ python evaluate.py --corpus eval/corpus.json --gold eval/gold.json 0.7 0.75 0.8 
     --ngram-max 2 --min-pair-similarity 0 --show-junk
 ```
 
-Ohne `--gold` gibt `evaluate.py` nur die Stories aus. Die Unit-Tests prüfen den Ablauf an
-einem kleinen erfundenen Satz (`tests/fixtures/eval_*.json`).
+Ohne `--gold` gibt `evaluate.py` statt der Tabelle nur Stories aus (wie ohne `--corpus`);
+`--replay` misst auch dann die Stabilität. Stories, von denen kein Artikelpaar markiert ist,
+zählt die Tabelle weder als sauber noch als gemischt oder unsinnig und nennt ihre Zahl
+darunter. Die Unit-Tests prüfen den Ablauf an einem kleinen erfundenen Satz
+(`tests/fixtures/eval_*.json`).
 
 Die Top-Stories-Seite zeigt nur Stories aus mindestens zwei Feeds (`web.min_sources`):
 Werbeblöcke („Anzeige: … Tiefstpreis“) oder Serien einer Redaktion ähneln sich
@@ -356,10 +359,13 @@ beim Anbieter statt auf Miniflux (ohne gültige URL nur als Text).
 Story, auch wenn diese weiterläuft; danach werden Stories gelöscht, die so lange nicht mehr
 aufgetaucht sind oder keine Artikel mehr haben.
 
-**Schlagzeile:** Die Schlagzeile einer Story bleibt, solange ihr Artikel noch dazugehört,
-kein Duplikat ist (Duplikate werden als gelesen markiert) und nicht als Rauschen gilt – auch
-wenn inzwischen ein längerer Artikel dazugekommen ist. Sonst wechselte der Titel mit jedem
-längeren Bericht, und der E-Ink-Reader müsste die ganze Seite neu aufbauen.
+**Schlagzeile:** Mit `canonical_strategy: longest` (Standard) bleibt die Schlagzeile einer
+Story, solange ihr Artikel noch dazugehört, kein Duplikat ist (Duplikate werden als gelesen
+markiert) und nicht als Rauschen gilt – auch wenn inzwischen ein längerer Artikel
+dazugekommen ist. Sonst wechselte der Titel mit jedem längeren Bericht, und der E-Ink-Reader
+müsste die ganze Seite neu aufbauen. Mit `newest` und `source_priority` gilt das nicht: Dort
+ist der Wechsel gewollt, der neueste Bericht bzw. die bessere Quelle übernimmt die
+Schlagzeile.
 
 **Ranking:** `Anzahl Quellen / (1 + Alter des neuesten Artikels in Stunden / 12)`, beides
 über die Artikel im Zeitfenster. Stories, deren Artikel im Fenster alle einem der

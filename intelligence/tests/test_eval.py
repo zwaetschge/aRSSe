@@ -61,8 +61,9 @@ def test_pairwise_scores_and_story_quality():
     assert row['labelled'] == 6
 
     quality = story_quality(gold, groups, url_of, feed_of)
-    assert {k: quality[k] for k in ('shown', 'pure', 'mixed', 'junk')} == \
-        {'shown': 3, 'pure': 2, 'mixed': 1, 'junk': 0}
+    # 3-7 has no labelled pair: it says nothing about purity
+    assert {k: quality[k] for k in ('shown', 'pure', 'mixed', 'junk', 'unlabelled')} == \
+        {'shown': 3, 'pure': 1, 'mixed': 1, 'junk': 0, 'unlabelled': 1}
     quality = story_quality(gold, [[4, 6], [1, 2]], url_of, feed_of)
     assert quality['junk_groups'] == [[4, 6]]
 
@@ -129,6 +130,37 @@ def test_evaluate_command_prints_the_table(tmp_path):
     assert '12 articles from 4 feeds' in result.stdout
     assert '1.000 1.000 1.000 |     5     5     0     0' in result.stdout
     assert 'id_kept' in result.stdout
+
+
+def test_evaluate_without_gold_prints_the_stories(tmp_path):
+    # No labels, no scores: an all-zero P/R table would read as a failure
+    result = subprocess.run(
+        [sys.executable, 'evaluate.py', '--corpus', str(FIXTURES / 'eval_corpus.json'),
+         '--replay', '2', '--config', str(tmp_path / 'missing.yaml')],
+        cwd=HERE.parent, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert '12 articles from 4 feeds' in result.stdout and 'labelled' not in result.stdout
+    assert '5 stories (>= 2 sources), 10/12 articles in stories' in result.stdout
+    assert 'Bundestag beschließt Haushalt für 2027' in result.stdout
+    assert ' P ' not in result.stdout and 'pure' not in result.stdout
+    assert 'id_kept' in result.stdout
+
+
+def test_evaluate_reports_stories_without_labels(tmp_path):
+    with open(FIXTURES / 'eval_gold.json', encoding='utf-8') as f:
+        data = json.load(f)
+    # The strike story (Zeit and Heise) loses its labels
+    data['articles'] = {url: label for url, label in data['articles'].items()
+                        if (label or {}).get('event') != 'STREIK'}
+    partial = tmp_path / 'gold.json'
+    partial.write_text(json.dumps(data))
+    result = subprocess.run(
+        [sys.executable, 'evaluate.py', '--corpus', str(FIXTURES / 'eval_corpus.json'),
+         '--gold', str(partial), '--config', str(tmp_path / 'missing.yaml')],
+        cwd=HERE.parent, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert '|     5     4     0     0 |' in result.stdout
+    assert 'Up to 1 shown stories have no labelled pair' in result.stdout
 
 
 def test_evaluate_refuses_a_gold_file_for_another_corpus(tmp_path):

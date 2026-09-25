@@ -8,8 +8,10 @@ Usage (inside the container):
     docker compose exec intelligence python evaluate.py
     docker compose exec intelligence python evaluate.py 0.7 0.75 0.8 --show 10
 
-With a saved corpus (eval/export_corpus.py) and gold labels it scores the
-clustering instead of printing samples (see docs/ARCHITECTURE.md):
+With a saved corpus (eval/export_corpus.py) it clusters the saved articles
+instead; with gold labels it scores the clustering instead of printing
+samples (see docs/ARCHITECTURE.md):
+    python evaluate.py --corpus eval/corpus.json --replay 25
     python evaluate.py --corpus eval/corpus.json --gold eval/gold.json
     python evaluate.py --corpus eval/corpus.json --gold eval/gold.json --replay 25
     python evaluate.py --corpus eval/corpus.json --gold eval/gold.json \\
@@ -86,6 +88,27 @@ def score(clusterer: NewsClusterer, entries: list, gold, show_junk: bool = False
     return row
 
 
+def score_thresholds(clusterer: NewsClusterer, entries: list, gold, args) -> None:
+    """Print the score table, one row per threshold."""
+    config = clusterer.config
+    print(" threshold |     P     R    F1 | shown  pure mixed  junk | noise heads | seconds")
+    unlabelled = 0
+    for threshold in args.thresholds:
+        config.clustering.threshold = threshold
+        row = score(clusterer, entries, gold, show_junk=args.show_junk)
+        unlabelled = max(unlabelled, row['unlabelled'])
+        print(f"   {threshold:5.2f}   | {row['precision']:.3f} {row['recall']:.3f} "
+              f"{row['f1']:.3f} | {row['shown']:5} {row['pure']:5} {row['mixed']:5} "
+              f"{row['junk']:5} | {row['noise_headlines']:11} | {row['seconds']:7.2f}")
+    print("\nP/R/F1: pairs of labelled articles in one story (must-link vs. cannot-link); "
+          "shown: stories with >= min_sources feeds;\njunk: shown stories without a "
+          "real same-event pair across feeds; noise heads: shown stories headed by "
+          "a noise title")
+    if unlabelled:
+        print(f"Up to {unlabelled} shown stories have no labelled pair and count as "
+              f"neither pure, mixed nor junk: label their articles in the gold file.")
+
+
 def evaluate_corpus(config, args) -> None:
     """Score thresholds (and optionally replay stability) on a saved corpus."""
     from eval.metrics import Gold, load_gold
@@ -101,7 +124,8 @@ def evaluate_corpus(config, args) -> None:
     entries = window(corpus, end, hours)
     labelled = sum(1 for e in entries if e.get('url') in gold.labels)
     print(f"{len(entries)} articles from {len({e.get('feed_id') for e in entries})} feeds "
-          f"({hours}h up to {end:%Y-%m-%d %H:%M} UTC), {labelled} labelled")
+          f"({hours}h up to {end:%Y-%m-%d %H:%M} UTC)"
+          + (f", {labelled} labelled" if args.gold else ""))
     if args.gold and not labelled:
         sys.exit("No article of the corpus is labelled in the gold file "
                  "(labels are keyed by entry URL).")
@@ -110,17 +134,17 @@ def evaluate_corpus(config, args) -> None:
           f"min_sources={config.web.min_sources}\n")
 
     clusterer = NewsClusterer(config, _NoStore(), client=_NoClient())
-    print(" threshold |     P     R    F1 | shown  pure mixed  junk | noise heads | seconds")
-    for threshold in args.thresholds:
-        config.clustering.threshold = threshold
-        row = score(clusterer, entries, gold, show_junk=args.show_junk)
-        print(f"   {threshold:5.2f}   | {row['precision']:.3f} {row['recall']:.3f} "
-              f"{row['f1']:.3f} | {row['shown']:5} {row['pure']:5} {row['mixed']:5} "
-              f"{row['junk']:5} | {row['noise_headlines']:11} | {row['seconds']:7.2f}")
-    print("\nP/R/F1: pairs of labelled articles in one story (must-link vs. cannot-link); "
-          "shown: stories with >= min_sources feeds;\njunk: shown stories without a "
-          "real same-event pair across feeds; noise heads: shown stories headed by "
-          "a noise title")
+    if args.gold:
+        score_thresholds(clusterer, entries, gold, args)
+    else:
+        # Nothing to score against: show the stories, as without --corpus
+        by_id = {e['id']: e for e in entries}
+        for threshold in args.thresholds:
+            config.clustering.threshold = threshold
+            print(f"threshold={threshold}")
+            describe(clusterer._cluster([dict(e) for e in entries]), by_id,
+                     config.web.min_sources, args.show)
+            print()
 
     if args.replay:
         for threshold in args.thresholds:
@@ -145,7 +169,8 @@ def main():
                         help=f'default: {DEFAULT_THRESHOLDS}, with --corpus the '
                              f'configured threshold')
     parser.add_argument('--show', type=int, default=6,
-                        help='stories to print per threshold (half largest, half random)')
+                        help='stories to print per threshold (half largest, half random; '
+                             'not with --gold)')
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--config', default=os.getenv('ARSSE_CONFIG', '/app/config.yaml'),
                         help='config.yaml (default: $ARSSE_CONFIG, /app/config.yaml or '

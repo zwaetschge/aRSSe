@@ -106,8 +106,8 @@ def test_entry_stored_while_paging_is_fetched_once(config, store):
     client.after_page = new_entry_arrives
     saved = []
     save_run = store.save_run
-    store.save_run = lambda entries, *args: saved.append(
-        [e['id'] for e in entries]) or save_run(entries, *args)
+    store.save_run = lambda entries, *args, **kwargs: saved.append(
+        [e['id'] for e in entries]) or save_run(entries, *args, **kwargs)
     stats = NewsClusterer(config, store, client=client).run_clustering_cycle()
 
     assert stats['errors'] == 0

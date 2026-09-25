@@ -101,9 +101,11 @@ def story_quality(gold: Gold, groups: list, url_of: dict, feed_of: dict,
 
     pure: no cannot-link pair; mixed: a cannot-link pair, but also a
     must-link pair across feeds (a real story with an intruder); junk:
-    no must-link pair across feeds (unrelated articles).
+    no must-link pair across feeds (unrelated articles); unlabelled: no
+    pair of the story is labelled, so none of the other three says
+    anything about it (shown = pure + mixed + junk + unlabelled).
     """
-    counts = {'shown': 0, 'pure': 0, 'mixed': 0, 'junk': 0}
+    counts = {'shown': 0, 'pure': 0, 'mixed': 0, 'junk': 0, 'unlabelled': 0}
     junk = []
     for group in groups:
         if len({feed_of.get(i, i) for i in group}) < min_sources:
@@ -111,7 +113,9 @@ def story_quality(gold: Gold, groups: list, url_of: dict, feed_of: dict,
         counts['shown'] += 1
         relations = [(gold.relation(url_of.get(a), url_of.get(b)), feed_of.get(a) != feed_of.get(b))
                      for a, b in _pairs(group)]
-        if all(r != CANNOT_LINK for r, _ in relations):
+        if all(r is None for r, _ in relations):
+            counts['unlabelled'] += 1
+        elif all(r != CANNOT_LINK for r, _ in relations):
             counts['pure'] += 1
         elif any(r == MUST_LINK and cross for r, cross in relations):
             counts['mixed'] += 1

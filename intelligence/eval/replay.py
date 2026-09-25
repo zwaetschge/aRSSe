@@ -91,7 +91,8 @@ def replay(clusterer, entries: list, end: datetime, runs: int = 25,
                 fetch = FetchResult(entries=run_entries, cutoff=now - timedelta(hours=lookback),
                                     min_id=min((e['id'] for e in run_entries), default=None),
                                     fetched_at=now)
-                store.save_run(run_entries, clusters, fetch, web.min_sources)
+                store.save_run(run_entries, clusters, fetch, web.min_sources,
+                               sticky_headline=clusterer._sticky_headline())
                 store.cleanup(config.storage.retention_days, lookback)
                 page = store.top_stories(lookback, web.max_stories, web.min_sources,
                                          web.earlier_articles_max, web.exclude_patterns)

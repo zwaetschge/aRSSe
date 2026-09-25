@@ -87,6 +87,9 @@ deduplication:
 
   # Strategie zur Auswahl des "besten" Artikels (auch Schlagzeile der Story)
   # Optionen: "longest", "source_priority", "newest"
+  # Bei "longest" bleibt die Schlagzeile einer Story stehen, auch wenn später
+  # ein längerer Artikel dazukommt; bei "newest" und "source_priority" wechselt
+  # sie zum neuesten Bericht bzw. zur besseren Quelle.
   canonical_strategy: "longest"
 
   # Quellen-Priorisierung für "source_priority" (höher = besser, Standard 50)

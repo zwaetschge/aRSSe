@@ -176,7 +176,8 @@ class NewsClusterer:
             stats['clusters_found'] = len(clusters)
             stats['duplicates_detected'] = sum(len(c.duplicate_ids) for c in clusters)
 
-            self.store.save_run(entries, clusters, fetch, self.config.web.min_sources)
+            self.store.save_run(entries, clusters, fetch, self.config.web.min_sources,
+                                sticky_headline=self._sticky_headline())
             self.store.refresh_auto_marked([e['id'] for e in entries])
             self.store.cleanup(self.config.storage.retention_days,
                                self.config.scheduling.lookback_hours)
@@ -473,6 +474,15 @@ class NewsClusterer:
             return cosine_similarity(vectorizer.fit_transform(bodies))
         except ValueError:  # no tokens left after stopword removal
             return None
+
+    def _sticky_headline(self) -> bool:
+        """
+        Whether a story keeps its headline across runs (StoryStore.save_run).
+
+        Only with 'longest': otherwise every longer report would take over
+        the headline. 'newest' and 'source_priority' follow the cluster.
+        """
+        return self.config.deduplication.canonical_strategy == 'longest'
 
     def _select_canonical(self, entries: list, group_indices: list,
                           auto_marked: frozenset = frozenset()) -> int:
