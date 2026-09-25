@@ -425,6 +425,15 @@ class NewsClusterer:
                     continue
                 if not same_item(member, seed) and not duplicate_of(member, seed):
                     continue
+                # An article that a duplicate marked in an earlier run still
+                # depends on stays unread, unless that duplicate also matches
+                # this seed: otherwise the marked one could end up without
+                # any unread copy of its text (copies arrive over several runs)
+                if any(entries[m]['id'] in auto_marked and m not in assigned
+                       and (same_item(m, member) or duplicate_of(m, member))
+                       and not (same_item(m, seed) or duplicate_of(m, seed))
+                       for m in order):
+                    continue
                 if any(same_item(member, kept) for kept in group):
                     copies.add(entries[member]['id'])
                 duplicates.add(entries[member]['id'])

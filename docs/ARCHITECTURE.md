@@ -143,7 +143,12 @@ Innerhalb einer Story gilt ein Paar als Duplikat, wenn (in dieser Reihenfolge):
   Miniflux seinen Text später aktualisiert und er dadurch der längste wird
 - Gruppen: Der beste noch freie Artikel bleibt stehen und nimmt alle freien Artikel auf, die
   Duplikate *von ihm* sind; die übrigen bilden eigene Gruppen. Jedes Duplikat wurde also mit dem
-  Artikel verglichen, der ungelesen bleibt. Als doppelt gelieferter Artikel (Fall 1) zählt ein
+  Artikel verglichen, der ungelesen bleibt. Das gilt auch über mehrere Läufe: Kopien kommen
+  nacheinander an, und ein Artikel, der für ein früher markiertes Duplikat stehen geblieben ist,
+  wird nicht nachträglich als Duplikat einer neuen, besseren Kopie markiert, wenn das markierte
+  Duplikat dieser neuen Kopie nicht ähnlich genug ist – sonst verschwände dessen eigener Text
+  (etwa ein exklusiver Satz) ganz aus den ungelesenen Artikeln. Dann bleiben ausnahmsweise zwei
+  ähnliche Kopien ungelesen. Als doppelt gelieferter Artikel (Fall 1) zählt ein
   Duplikat, das derselbe Artikel ist wie ein besser eingestuftes Mitglied seiner Gruppe
 - Duplikate werden optional per `PUT /v1/entries` in Miniflux als gelesen markiert, mit
   `mark_read_scope: visible` (Standard) nur in Stories aus mindestens `web.min_sources` Feeds und

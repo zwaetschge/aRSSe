@@ -402,6 +402,45 @@ def agency_copies():
     ]
 
 
+
+# Agency text A, a shorter outlet version C with an exclusive sentence and a
+# longer one B: A-B .89, A-C .87, B-C .77 at the default threshold .85
+_CHAIN_CORE = (BUDGET + ' Die Haushaltsdebatte dauerte drei Tage, am Ende stimmte eine knappe '
+               'Mehrheit der Abgeordneten für den Entwurf der Regierung. Die Neuverschuldung '
+               'sinkt im Vergleich zum Vorjahr leicht, die Investitionen bleiben auf hohem Niveau.')
+_CHAIN_PARA = ' Die Länder fordern mehr Geld für Kitas, Schulen und Hochschulen im kommenden Jahr.'
+_CHAIN_TEXT = {
+    'A': _CHAIN_CORE + _CHAIN_PARA,
+    'C': _CHAIN_CORE + ' Exklusiv: Minister erwägt Rücktritt.',
+    'B': _CHAIN_CORE + _CHAIN_PARA + ' Außerdem erhält das Verteidigungsministerium ein '
+         'Sondervermögen für Marine, Heer und Luftwaffe, das über zehn Jahre ausgezahlt '
+         'werden soll, sagte ein Sprecher am Abend.',
+}
+
+
+@pytest.mark.parametrize('arrival', ['ACB', 'CAB', 'ABC', 'BCA'])
+def test_marked_duplicate_keeps_an_unread_copy_across_runs(config, store, arrival):
+    """Copies arrive over several runs: A and C first (C marked as A's
+    duplicate), then B, which beats A but is too different from C. A must
+    stay unread, or C's exclusive sentence is hidden in Miniflux."""
+    config.deduplication.threshold = 0.85  # production default
+    feeds = {'A': 1, 'B': 2, 'C': 3}
+    client = FakeClient(sample_entries()[3:])
+    ids = {}
+    for n, name in enumerate(arrival):
+        ids[name] = 10 + n
+        client.entries.append(make_entry(ids[name], feeds[name], 'Bundestag beschließt Haushalt',
+                                         _CHAIN_TEXT[name], hours_ago=3 - n))
+        assert NewsClusterer(config, store, client=client).run_clustering_cycle()['errors'] == 0
+
+    status = {name: next(e['status'] for e in client.entries if e['id'] == ids[name])
+              for name in 'ABC'}
+    # C only shares enough text with A: whenever C is read, A must be unread
+    if status['C'] == 'read':
+        assert status['A'] == 'unread', status
+    assert list(status.values()).count('unread') >= 1
+
+
 @pytest.mark.parametrize('order', list(itertools.permutations(range(3))))
 def test_duplicates_are_compared_with_their_canonical(config, store, order):
     config.deduplication.threshold = 0.8
