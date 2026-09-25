@@ -151,7 +151,11 @@ Innerhalb einer Story gilt ein Paar als Duplikat, wenn (in dieser Reihenfolge):
   markiert hat: Setzt der Nutzer ein Duplikat wieder auf ungelesen, bleibt es dabei. Einträge
   verfallen `lookback_hours` + 24 h nach dem letzten Abruf, der den Artikel noch enthielt –
   nicht nach dem Markieren: Miniflux übernimmt Datumsangaben in der Zukunft unverändert, und
-  solche Artikel bleiben bis zu diesem Datum im Abruffenster
+  solche Artikel bleiben bis zu diesem Datum im Abruffenster. Beim Update auf Schema 3 wird die
+  Tabelle mit allen Duplikaten gefüllt, die bereits gelesen sind: Ältere Versionen markierten
+  jedes ungelesene Duplikat in jedem Lauf und wählten die bleibende Kopie anders (bei
+  Gleichstand die höchste ID, `longest` zählte HTML). Ohne diese Übernahme ließe der erste Lauf
+  nach dem Update die schon markierte Kopie stehen und markierte die andere auch
 
 #### Story-Speicher
 Die Miniflux-API kann Einträge nur in Titel, Inhalt und Status ändern – Tags oder
@@ -190,7 +194,10 @@ Version 1. Ist die Datenbank neuer als der Code, startet der Dienst nicht
 („Datenbank stammt von neuerer aRSSe-Version“). Eine Änderung, die sich nicht per SQL
 nachziehen lässt, wird als `REBUILD` eingetragen: Die alte Datei wandert nach
 `arsse.db.v<N>.bak` und die Datenbank entsteht neu – sie ist ein Zwischenspeicher, der
-nächste Lauf holt alles wieder aus Miniflux, nur Story-IDs und „zuerst gesehen“ gehen verloren.
+nächste Lauf holt alles wieder aus Miniflux. Verloren gehen nur Story-IDs, „zuerst gesehen“
+und `auto_marked`: Duplikate im aktuellen Zeitfenster, die der Nutzer wieder auf ungelesen
+gesetzt hat, werden dann noch einmal als gelesen markiert. Dasselbe gilt, wenn `arsse.db`
+gelöscht oder ein älteres Backup eingespielt wird.
 
 **Lesen:** Die Weboberfläche liest Story und Artikel in einer Lesetransaktion. Ein Lauf,
 der dazwischen speichert, kann daher keine halbe Story (und keinen Fehler 500) erzeugen.

@@ -85,11 +85,23 @@ UPDATE entries SET published_at = substr(published_at, 1, 19) || '+00:00'
 # if the user sets it back to unread, that decision stands. save_run never
 # touches this table; marked_at moves forward while the entry is still
 # fetched (refresh_auto_marked), and cleanup drops rows once it is not.
+#
+# Earlier versions marked every unread duplicate read in each run and then
+# stored it as read, and picked the canonical copy differently (ties went to
+# the highest ID, 'longest' counted HTML). Without seeding, the first run
+# after the upgrade could keep the copy already marked read and mark the
+# other one too. A duplicate the user read themselves is seeded as well;
+# that only makes an unread copy the canonical one, which is harmless.
+# marked_at uses the format of db_timestamp().
 SCHEMA_V3 = """
 CREATE TABLE auto_marked (
     entry_id  INTEGER PRIMARY KEY,
     marked_at TEXT NOT NULL
 );
+INSERT INTO auto_marked (entry_id, marked_at)
+    SELECT e.id, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now') FROM entries e
+    JOIN story_entries se ON se.entry_id = e.id
+    WHERE se.is_duplicate = 1 AND e.status = 'read';
 """
 
 
@@ -100,7 +112,8 @@ class _Rebuild:
 
 # Marks a schema change that cannot be migrated in place. The store only
 # caches what Miniflux holds, so an existing database is moved aside to
-# arsse.db.v<N>.bak and rebuilt; only story IDs and first_seen are lost.
+# arsse.db.v<N>.bak and rebuilt; only story IDs, first_seen and the record
+# of duplicates marked read (auto_marked) are lost.
 REBUILD = _Rebuild()
 
 # Append-only: MIGRATIONS[i] turns schema version i into version i + 1.
