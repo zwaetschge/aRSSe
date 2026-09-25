@@ -74,6 +74,11 @@ Artikel liegen weit darunter; ein defekter oder feindseliger Feed mit mehreren M
 Eintrag kostete sonst bei jedem Lauf Sekunden und Hunderte MB Speicher.
 Eingebettete `data:`-URIs (Miniflux behält z. B. `data:image/*`) werden vorher entfernt:
 Sie enthalten keinen Text, würden die 200 000 Zeichen aber allein füllen.
+Als Vorschautext (Snippet, höchstens 280 Zeichen) dient der Klartext ohne angehängte
+Teaser-Links (`[ mehr ]` bei Tagesschau und MDR, `mehr...` bei taz, `Weiterlesen`); ein
+nacktes „mehr“ nur nach Satzende, damit „gibt es nicht mehr“ stehen bleibt. Texte unter
+20 Zeichen, das wörtliche `None` mancher Feeds und eine bloße Wiederholung des Titels
+ergeben kein Snippet.
 
 #### TF-IDF Vektorisierung
 ```python
@@ -304,8 +309,8 @@ Version 1. Ist die Datenbank neuer als der Code, startet der Dienst nicht
 („Datenbank stammt von neuerer aRSSe-Version“). Eine Änderung, die sich nicht per SQL
 nachziehen lässt, wird als `REBUILD` eingetragen: Die alte Datei wandert nach
 `arsse.db.v<N>.bak` und die Datenbank entsteht neu – sie ist ein Zwischenspeicher, der
-nächste Lauf holt alles wieder aus Miniflux. Verloren gehen nur Story-IDs, „zuerst gesehen“
-und `auto_marked`: Duplikate im aktuellen Zeitfenster, die der Nutzer wieder auf ungelesen
+nächste Lauf holt alles wieder aus Miniflux. Verloren gehen nur Story-IDs und
+`auto_marked`: Duplikate im aktuellen Zeitfenster, die der Nutzer wieder auf ungelesen
 gesetzt hat, werden dann noch einmal als gelesen markiert. Dasselbe gilt, wenn `arsse.db`
 gelöscht oder ein älteres Backup eingespielt wird.
 
@@ -402,6 +407,44 @@ Dark Mode über `prefers-color-scheme`. Artikel-Links führen nach Miniflux (`BA
 Zeigt `BASE_URL` auf eine Loopback-Adresse, setzt die Oberfläche die Links pro Anfrage
 aus dem aufgerufenen Host und `MINIFLUX_PORT` zusammen, da der Reader nie der Server ist.
 
+Für E-Ink ausgelegt, wo eine Seite stundenlang stehen bleibt und jedes Scrollen einen
+Teil-Refresh mit Geisterbildern kostet:
+- *Seiten:* `web.page_size` Stories pro Seite (Standard 10, `?seite=N`), insgesamt höchstens
+  `web.max_stories` (Standard 100). `store.top_stories_page` liefert die Seite und die
+  Gesamtzahl aus derselben Rangliste; eine Seite außerhalb von 1…N (oder kein Zahlwert)
+  ergibt `404`. Seite 1 des Referenzsatzes ist rund 21 KB groß. Oben und unten führen
+  44 px hohe Links „← Zurück“/„Weiter →“ weiter, die Statuszeile lautet z. B.
+  „Stand 18:32 · Seite 1 von 7 · 63 Stories“.
+- *Uhrzeiten:* nur absolut, weil relative Angaben („vor 5 Min.“) auf einem stehenden
+  Bildschirm unbemerkt falsch werden: `14:53` für heute, `Mi 14:53` innerhalb einer Woche,
+  sonst `17.09. 14:53`, jeweils als `<time datetime="…">`. Zeitzone: `web.timezone`, sonst
+  `TZ` (docker-compose übergibt `Europe/Berlin`), sonst Europe/Berlin; die Zeitzonendaten
+  bringt das Paket `tzdata` mit, weil `python:3.11-slim` keine hat. Eine Story-Seite nennt
+  „Erste Meldung 14:53 (taz) · zuletzt 18:10 (Deutschlandfunk)“ – ältester und neuester
+  Artikel im Zeitfenster, nicht der Zeitpunkt des Clustering-Laufs.
+- *Berichterstattung:* Unter der Schlagzeile bekommt zuerst jede andere Quelle einen Platz
+  (ihr neuester Artikel, `store.select_coverage`), der Feed der Schlagzeile und weitere
+  Artikel derselben Feeds nur die übrigen der `web.articles_per_story` Plätze. Duplikate
+  stehen dort nicht, sondern als „+2 gleichlautende Meldungen“ in der Meta-Zeile; auf der
+  Story-Seite zusammengeklappt (`<details>`) unter „Gleichlautende Meldungen“.
+- *Story-Seite:* „Nach Aktualität“ (neueste zuerst, je Artikel ein eigener 44-px-Link
+  „Original“ zum Anbieter) oder `?ansicht=chronologisch` (älteste zuerst, nach Tagen
+  gruppiert, mit einer Zeile Snippet je Artikel).
+- *Titel ohne Text:* Ein Artikel ohne Titel (z. B. ein Nachrichtenticker) erscheint als
+  „MDR: +++ Landtag wählt …“ (Feed und die ersten 80 Zeichen) statt „(ohne Titel)“.
+- *Bedienung:* Jede Zeile der Berichterstattung ist ein Block-Link mit Quelle und Uhrzeit,
+  mindestens 44 px hoch. Titel sind dünn unterstrichen, besuchte Links gepunktet (ohne
+  Farben auf Graustufen-Displays sonst nicht zu unterscheiden). Pfeile sind für
+  Screenreader ausgeblendet (`aria-hidden`).
+- *Always-on:* `?auto=1` lädt die Seite alle 30 Minuten neu (`<meta http-equiv=refresh>`,
+  kein JavaScript); die Seiten-Links behalten den Parameter.
+- *Startbildschirm:* `intelligence/static/` enthält `manifest.webmanifest` (`start_url` `/`,
+  `display: standalone`), PNG-Icons in 192 und 512 px, ein SVG-Icon und `favicon.ico`
+  (auch unter `/favicon.ico`). Die Icons erzeugt `scripts/make-icons.py` nur mit der
+  Standardbibliothek. Einen Service Worker gibt es nicht, die Seiten bleiben ohne
+  JavaScript. `/static/` ist ohne Anmeldung erreichbar, weil Browser Manifest und Icons
+  ohne Zugangsdaten abrufen; `/favicon.ico` und alle Seiten verlangen sie.
+
 **Zugriffsschutz der Top Stories** (`web.auth`, `web.allowed_hosts`): Ein `before_request`-
 Hook prüft jede Anfrage in dieser Reihenfolge:
 1. *Host:* Ist `web.allowed_hosts` gesetzt, bekommt jeder andere Hostname `400` (Schutz vor
@@ -431,7 +474,10 @@ Miniflux nicht erreichbar, wiederholt er das beim nächsten Lauf, ohne den Lauf 
 
 **Miniflux-Themes:** `css/eink-theme.css` und `css/color-theme.css` als
 benutzerdefiniertes CSS. Miniflux liefert Manifest und Service Worker selbst mit,
-die PWA-Installation läuft über Miniflux.
+die PWA-Installation läuft über Miniflux. Die Themes verwenden die Schriften des Geräts
+(Literata, Charter, Georgia bzw. die Systemschrift) und laden nichts von fremden Servern;
+die Google-Fonts-Zeile ist auskommentiert und nur ein Angebot – aktiviert, ruft jede
+Miniflux-Seite Google auf, und Miniflux muss die Font-Hosts in seine CSP aufnehmen.
 
 **E-Ink-Optimierung:**
 - Keine Animationen/Transitions

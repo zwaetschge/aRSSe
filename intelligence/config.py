@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -25,6 +26,8 @@ DUPLICATE_ACTIONS = ('none', 'mark_read')
 MARK_READ_SCOPES = ('visible', 'all')
 CANONICAL_STRATEGIES = ('longest', 'source_priority', 'newest')
 WEB_AUTH_MODES = ('none', 'basic', 'proxy')
+# Time zone of the web interface when neither web.timezone nor TZ is set
+DEFAULT_TIMEZONE = 'Europe/Berlin'
 
 # Values accepted by older versions of config.yaml
 _LEGACY_DUPLICATE_ACTIONS = {'tag': 'none', 'hide': 'mark_read'}
@@ -136,7 +139,10 @@ class WebConfig:
     """Configuration for the Top Stories web interface."""
     host: str = "0.0.0.0"
     port: int = 8081
-    max_stories: int = 50
+    # Overall cap on the stories listed, over all pages
+    max_stories: int = 100
+    # Stories per page: short pages suit E-Ink (one refresh per page)
+    page_size: int = 10
     articles_per_story: int = 6
     # Stories covered by fewer feeds are not shown (filters feed-internal
     # series and advertising that only resemble each other)
@@ -149,6 +155,9 @@ class WebConfig:
     # Host names the interface answers to (DNS rebinding protection);
     # empty = any. localhost and loopback addresses are always allowed.
     allowed_hosts: list = field(default_factory=list)
+    # Time zone of the times shown (IANA name, e.g. Europe/Berlin);
+    # empty = the TZ environment variable, else DEFAULT_TIMEZONE
+    timezone: str = ""
     auth: WebAuthConfig = field(default_factory=WebAuthConfig)
 
 
@@ -319,6 +328,8 @@ def _apply_env_config(config: Config) -> None:
     # Web
     if port := _env('WEB_PORT'):
         config.web.port = _env_number('WEB_PORT', port, int)
+    if page_size := _env('WEB_PAGE_SIZE'):
+        config.web.page_size = _env_number('WEB_PAGE_SIZE', page_size, int)
     if hosts := _env('WEB_ALLOWED_HOSTS'):
         config.web.allowed_hosts = _split_list(hosts)
     auth = config.web.auth
@@ -380,6 +391,7 @@ _NUMERIC_FIELDS = (
     ('scheduling.lookback_hours', ('scheduling', 'lookback_hours'), True),
     ('storage.retention_days', ('storage', 'retention_days'), True),
     ('web.max_stories', ('web', 'max_stories'), True),
+    ('web.page_size', ('web', 'page_size'), True),
     ('web.articles_per_story', ('web', 'articles_per_story'), True),
     ('web.min_sources', ('web', 'min_sources'), True),
     ('web.earlier_articles_max', ('web', 'earlier_articles_max'), True),
@@ -471,6 +483,35 @@ def _host_name(name: str, value: str) -> str:
         raise ConfigError(f"{name}: '{value}' is not a host name "
                           f"(e.g. tower.local, without http://)")
     return host
+
+
+def _zone(name: str) -> Optional[ZoneInfo]:
+    """The time zone called name, or None if there is none by that name."""
+    try:
+        # glibc accepts TZ=':Europe/Berlin' as well
+        return ZoneInfo(name.strip().lstrip(':'))
+    except (ValueError, KeyError, OSError):
+        return None
+
+
+def resolve_timezone(configured: str) -> ZoneInfo:
+    """
+    Time zone of the times shown: web.timezone, else the TZ environment
+    variable (set in docker-compose.yml), else DEFAULT_TIMEZONE.
+
+    web.timezone is checked by load_config; an unusable TZ (e.g. a POSIX
+    rule like 'CET-1CEST') only costs a warning.
+    """
+    if configured:
+        return _zone(configured) or ZoneInfo(DEFAULT_TIMEZONE)
+    tz = _env('TZ')
+    if tz:
+        zone = _zone(tz)
+        if zone is not None:
+            return zone
+        logger.warning("TZ=%r is not a time zone name like %s; Top Stories show times "
+                       "in %s (set web.timezone)", tz, DEFAULT_TIMEZONE, DEFAULT_TIMEZONE)
+    return ZoneInfo(DEFAULT_TIMEZONE)
 
 
 def _trusted_network(value: str):
@@ -572,6 +613,12 @@ def _validate(config: Config) -> None:
         raise ConfigError("web.min_sources must be at least 1")
     if config.web.max_stories < 1:
         raise ConfigError("web.max_stories must be at least 1")
+    if config.web.page_size < 1:
+        raise ConfigError("web.page_size must be at least 1")
+    if not isinstance(config.web.timezone, str) or (
+            config.web.timezone and _zone(config.web.timezone) is None):
+        raise ConfigError(f"web.timezone must be a time zone name like "
+                          f"'{DEFAULT_TIMEZONE}', got {config.web.timezone!r}")
     if config.web.articles_per_story < 0:
         raise ConfigError("web.articles_per_story must not be negative")
     if config.web.earlier_articles_max < 0:

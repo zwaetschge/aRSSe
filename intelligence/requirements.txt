@@ -18,5 +18,8 @@ pyyaml>=6,<7
 flask>=3,<4
 waitress>=3,<4
 
+# Time zone data for the times shown (python:3.11-slim has no system tzdata)
+tzdata>=2024.1
+
 # Structured logging (logging.json_format)
 python-json-logger>=2,<4

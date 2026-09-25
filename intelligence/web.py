@@ -8,15 +8,20 @@ works on E-Ink readers and behind restrictive networks alike.
 import hmac
 import ipaddress
 import logging
+import mimetypes
+import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from itertools import groupby
 from typing import Optional
 from urllib.parse import urlsplit
 
-from flask import Flask, Response, abort, g, jsonify, render_template, request
+from flask import (Flask, Response, abort, g, jsonify, render_template, request,
+                   send_from_directory, url_for)
+from markupsafe import Markup
 
-from config import Config, WebAuthConfig
-from store import StoryStore, parse_date
+from config import Config, WebAuthConfig, resolve_timezone
+from store import StoryStore, parse_date, select_coverage
 
 logger = logging.getLogger('arsse-intelligence')
 
@@ -36,12 +41,27 @@ SECURITY_HEADERS = {
     'Cross-Origin-Resource-Policy': 'same-origin',
 }
 # Reachable without login: the Docker health check and files a browser
-# fetches without credentials (web app manifest)
+# fetches without credentials (web app manifest and its icons)
 PUBLIC_PATHS = ('/healthz',)
 PUBLIC_PREFIXES = ('/static/',)
 # Always accepted Host names, so the health check and local calls work
 LOOPBACK_HOSTS = ('localhost', '127.0.0.1', '::1')
 SAFE_METHODS = ('GET', 'HEAD', 'OPTIONS')
+
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+# Not in every mime.types; browsers ignore a manifest served as text/plain
+mimetypes.add_type('application/manifest+json', '.webmanifest')
+
+# Always-on displays reload the front page this often with ?auto=1 (seconds)
+AUTO_REFRESH_SECONDS = 1800
+# An untitled article is labelled with this many characters of its text
+UNTITLED_LABEL_CHARS = 80
+
+WEEKDAYS = ('Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So')
+WEEKDAY_NAMES = ('Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag',
+                 'Samstag', 'Sonntag')
+MONTHS = ('Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August',
+          'September', 'Oktober', 'November', 'Dezember')
 
 
 def is_loopback_url(url: str) -> bool:
@@ -68,6 +88,58 @@ def request_hostname() -> Optional[str]:
     if not host or not _HOSTNAME.match(host):
         return None
     return f'[{host}]' if ':' in host else host
+
+
+def clock(value: Optional[str], zone, now: Optional[datetime] = None) -> Markup:
+    """
+    Absolute time for pages that stay on screen for hours (E-Ink).
+
+    '14:53' today, 'Mi 14:53' within the last week and '17.09. 14:53'
+    before that, in the time zone zone and wrapped in <time datetime=...>.
+    Relative times ('vor 5 Min.') would silently go stale.
+    """
+    parsed = parse_date(value)
+    if not parsed:
+        return Markup('')
+    local = parsed.astimezone(zone)
+    today = (now or datetime.now(timezone.utc)).astimezone(zone).date()
+    text = local.strftime('%H:%M')
+    days = abs((today - local.date()).days)
+    if days >= 7:
+        text = local.strftime('%d.%m. ') + text
+    elif days:
+        text = f'{WEEKDAYS[local.weekday()]} {text}'
+    return Markup('<time datetime="{}">{}</time>').format(
+        local.isoformat(timespec='minutes'), text)
+
+
+def day_label(day: date, today: date) -> str:
+    """'Heute', 'Gestern' or 'Mittwoch, 23. September' as a timeline heading."""
+    if day == today:
+        return 'Heute'
+    if day == today - timedelta(days=1):
+        return 'Gestern'
+    return f'{WEEKDAY_NAMES[day.weekday()]}, {day.day}. {MONTHS[day.month - 1]}'
+
+
+def display_title(article: Optional[dict], with_feed: bool = True) -> str:
+    """
+    Title of an article; an untitled one (news ticker) is labelled with the
+    start of its text, prefixed with its feed unless the source is shown
+    next to it anyway.
+    """
+    if not article:
+        return '(ohne Titel)'
+    title = (article.get('title') or '').strip()
+    if title:
+        return title
+    snippet = (article.get('snippet') or '').strip()
+    if not snippet:
+        return '(ohne Titel)'
+    if len(snippet) > UNTITLED_LABEL_CHARS:
+        snippet = snippet[:UNTITLED_LABEL_CHARS].rsplit(' ', 1)[0].rstrip(' .,;:') + ' …'
+    feed = (article.get('feed_title') or '').strip()
+    return f'{feed}: {snippet}' if with_feed and feed else snippet
 
 
 def _unauthorized() -> Response:
@@ -158,7 +230,11 @@ def require_same_origin() -> None:
 
 def create_app(config: Config, store: StoryStore) -> Flask:
     """Create the Flask application."""
-    app = Flask(__name__)
+    app = Flask(__name__, static_folder=STATIC_DIR)
+    # Template indentation is not sent: every KB counts on E-Ink readers
+    app.jinja_env.trim_blocks = True
+    app.jinja_env.lstrip_blocks = True
+    zone = resolve_timezone(config.web.timezone)
     public_url = config.miniflux_public_url.rstrip('/')
     max_age_hours = config.scheduling.lookback_hours
 
@@ -252,20 +328,61 @@ def create_app(config: Config, store: StoryStore) -> Flask:
             return f'vor {minutes // 60} Std.'
         return f'vor {minutes // (60 * 24)} T.'
 
+    @app.template_filter('clock')
+    def clock_filter(value: Optional[str]) -> Markup:
+        return clock(value, zone)
+
+    def timeline(articles: list) -> list:
+        """Articles oldest first, grouped by day: [(heading, articles)]."""
+        today = datetime.now(timezone.utc).astimezone(zone).date()
+        dated = [(parse_date(a['published_at']), a) for a in articles]
+        dated.sort(key=lambda pair: (pair[0] is not None, pair[0] or 0, pair[1]['id']))
+        return [(day_label(day, today) if day else 'Ohne Datum',
+                 [a for _, a in group])
+                for day, group in groupby(dated, key=lambda pair: pair[0].astimezone(zone)
+                                          .date() if pair[0] else None)]
+
     @app.context_processor
     def helpers():
-        return {'entry_link': entry_link, 'safe_url': safe_url, 'miniflux_url': miniflux_base()}
+        return {'entry_link': entry_link, 'safe_url': safe_url, 'miniflux_url': miniflux_base(),
+                'display_title': display_title, 'select_coverage': select_coverage,
+                'timeline': timeline, 'auto_refresh': AUTO_REFRESH_SECONDS
+                if request.args.get('auto') == '1' else None}
 
     def top_stories() -> list:
         return store.top_stories(max_age_hours, config.web.max_stories,
                                  config.web.min_sources, config.web.earlier_articles_max,
                                  config.web.exclude_patterns)
 
+    def page_url(page: int) -> str:
+        """Link to another page of the front page, keeping ?auto=1."""
+        args = {'seite': page} if page > 1 else {}
+        if request.args.get('auto') == '1':
+            args['auto'] = 1
+        return url_for('index', **args)
+
     @app.get('/')
     def index():
+        page = request.args.get('seite', '1')
+        if not re.fullmatch(r'[1-9][0-9]{0,5}', page):
+            abort(404)
+        page = int(page)
+        page_size = config.web.page_size
+        stories, total = store.top_stories_page(
+            max_age_hours, config.web.max_stories, (page - 1) * page_size, page_size,
+            config.web.min_sources, config.web.earlier_articles_max,
+            config.web.exclude_patterns)
+        pages = max(1, -(-total // page_size))
+        if page > pages:
+            abort(404)
         return render_template(
             'index.html',
-            stories=top_stories(),
+            stories=stories,
+            total=total,
+            page=page,
+            pages=pages,
+            prev_url=page_url(page - 1) if page > 1 else None,
+            next_url=page_url(page + 1) if page < pages else None,
             per_story=config.web.articles_per_story,
             last_success=store.get_meta('last_success'),
         )
@@ -275,7 +392,22 @@ def create_app(config: Config, store: StoryStore) -> Flask:
         found = store.get_story(story_id, max_age_hours, config.web.earlier_articles_max)
         if not found:
             abort(404)
-        return render_template('story.html', story=found)
+        chronological = request.args.get('ansicht') == 'chronologisch'
+        return render_template(
+            'story.html',
+            story=found,
+            chronological=chronological,
+            # Oldest and newest article in the window (articles are newest first)
+            first=found['articles'][-1],
+            last=found['articles'][0],
+            originals=[a for a in found['articles'] if not a['is_duplicate']],
+            duplicates=[a for a in found['articles'] if a['is_duplicate']],
+        )
+
+    @app.get('/favicon.ico')
+    def favicon():
+        # Browsers ask for it without being told; the pages link /static icons
+        return send_from_directory(STATIC_DIR, 'favicon.ico')
 
     @app.get('/api/stories')
     def api_stories():

@@ -17,10 +17,19 @@
  */
 
 /* ===========================================
-   WEB FONTS
+   FONTS
+   ===========================================
+   Local fonts only (system sans-serif, Literata/Charter/Georgia for
+   headlines). Nothing is loaded from other servers, so Miniflux needs no
+   external font hosts.
+
+   Optional web fonts: remove the comment marks around the @import line
+   and enter "fonts.googleapis.com fonts.gstatic.com" in Miniflux under
+   Einstellungen > Externe Schriftart-Hosts. Every page view then contacts
+   Google (IP address, time).
    =========================================== */
 
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;0,9..144,700;1,9..144,400&family=IBM+Plex+Mono:wght@400;500&display=swap');
+/* @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;0,9..144,700;1,9..144,400&family=IBM+Plex+Mono:wght@400;500&display=swap'); */
 
 /* ===========================================
    CSS CUSTOM PROPERTIES
@@ -54,9 +63,12 @@
     --text-glow: rgba(0, 245, 212, 0.5);
 
     /* Typography */
-    --font-display: 'Fraunces', Georgia, serif;
-    --font-body: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-mono: 'IBM Plex Mono', 'Fira Code', monospace;
+    /* The web fonts (see FONTS) come first and are only used when loaded
+       or installed; otherwise the local fonts after them */
+    --font-display: 'Fraunces', Literata, Charter, 'Bitstream Charter', Georgia, serif;
+    --font-body: 'Outfit', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                 sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, 'Fira Code', Menlo, Consolas, monospace;
 
     /* Spacing Scale */
     --space-2xs: 4px;

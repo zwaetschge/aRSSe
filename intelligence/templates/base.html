@@ -4,6 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+{% if auto_refresh %}<meta http-equiv="refresh" content="{{ auto_refresh }}">
+{% endif %}
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="aRSSe">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>{% block title %}Top Stories{% endblock %} · aRSSe</title>
 <style>
   /* E-Ink first: no animations, no web fonts, pure contrast */
@@ -25,42 +35,63 @@
     color: var(--ink);
     font: 1.05rem/1.5 Georgia, "Times New Roman", serif;
   }
-  a { color: inherit; }
+  a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: .15em; }
+  /* Grayscale screens have no link colours: dotted = already opened */
+  a:visited { text-decoration-style: dotted; }
   header {
     display: flex;
     justify-content: space-between;
-    align-items: baseline;
+    align-items: center;
     flex-wrap: wrap;
-    gap: .5rem;
+    gap: 0 .5rem;
     border-bottom: 3px double var(--rule);
-    padding: 1rem 0 .5rem;
-    margin-bottom: 1rem;
+    padding: .5rem 0 .25rem;
+    margin-bottom: .75rem;
   }
   header h1 { margin: 0; font-size: 1.6rem; letter-spacing: .02em; }
-  header nav a { margin-left: 1rem; }
-  .meta, .status { color: var(--muted); font-size: .85rem; }
+  header h1 a { text-decoration: none; }
+  /* Tap targets: at least 44px high (E-Ink touch panels are imprecise) */
+  header nav a, .pager a, .views a, .views span, .more, .original, details summary {
+    display: inline-block;
+    min-height: 44px;
+    line-height: 44px;
+  }
+  header nav a { padding: 0 .5rem; }
+  .meta, .status, ul.coverage time { color: var(--muted); font-size: .85rem; }
+  .status { margin: 0 0 .25rem; }
+  .pager { display: flex; justify-content: space-between; gap: 1rem; }
+  .pager a { padding: 0 .75rem; border: 1px solid var(--rule); }
+  .pager.bottom { margin-top: 1rem; }
   article.story {
     border-bottom: 1px solid var(--rule);
     padding: .75rem 0 1rem;
   }
   .story h2 { margin: 0 0 .25rem; font-size: 1.25rem; line-height: 1.3; }
-  .story h2 a { text-decoration: none; }
-  .story h2 a:hover, .story h2 a:focus { text-decoration: underline; }
   .snippet { margin: .25rem 0 .5rem; }
   .story h3 { margin: 1.25rem 0 0; font-size: 1rem; }
   ul.coverage { list-style: none; margin: .5rem 0 0; padding: 0; }
-  ul.coverage li { padding: .35rem 0; border-top: 1px dotted var(--rule); }
-  ul.coverage a { text-decoration: none; }
+  ul.coverage li { border-top: 1px dotted var(--rule); }
+  /* Each row is one link with source and time inside */
+  ul.coverage a { display: block; padding: .6rem 0; min-height: 44px; }
+  /* Inline blocks keep the underline to the title */
+  ul.coverage b, ul.coverage time, .line { display: inline-block; }
+  ul.coverage .plain { padding: .6rem 0; }
+  ul.coverage a.original { padding: 0; }
+  .line { width: 100%; vertical-align: top; white-space: nowrap; overflow: hidden;
+          text-overflow: ellipsis; }
   .source { font-weight: bold; }
   .duplicate { color: var(--muted); }
-  .duplicate .label { font-size: .75rem; border: 1px solid var(--muted); padding: 0 .25rem; }
-  .more { display: inline-block; margin-top: .5rem; min-height: 44px; line-height: 44px; }
+  .views { margin: .5rem 0 0; }
+  .views a, .views span { padding: 0 .5rem 0 0; }
+  .views span { font-weight: bold; }
+  details summary { cursor: pointer; }
+  .more { margin-top: .5rem; }
   .empty { padding: 2rem 0; text-align: center; }
 </style>
 </head>
 <body>
 <header>
-  <h1><a href="/" style="text-decoration:none">aRSSe</a></h1>
+  <h1><a href="/">aRSSe</a></h1>
   <nav><a href="/">Top Stories</a><a href="{{ miniflux_url }}">Miniflux</a></nav>
 </header>
 <main>

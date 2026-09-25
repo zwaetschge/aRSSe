@@ -17,10 +17,19 @@
  */
 
 /* ===========================================
-   WEB FONTS
+   FONTS
+   ===========================================
+   Local fonts only: the reader's own serif (Literata on Kobo and many
+   Android readers, Charter on iOS/macOS, Georgia elsewhere). Nothing is
+   loaded from other servers, so Miniflux needs no external font hosts.
+
+   Optional web fonts: remove the comment marks around the @import line
+   and enter "fonts.googleapis.com fonts.gstatic.com" in Miniflux under
+   Einstellungen > Externe Schriftart-Hosts. Every page view then contacts
+   Google (IP address, time) and E-Ink devices render more slowly.
    =========================================== */
 
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400&family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;700&display=swap');
+/* @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400&family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;700&display=swap'); */
 
 /* ===========================================
    CSS CUSTOM PROPERTIES
@@ -40,9 +49,11 @@
     --paper-shadow: #EBEBEB;
 
     /* Typography Scale */
-    --font-display: 'Playfair Display', 'Georgia', serif;
-    --font-body: 'Libre Baskerville', 'Georgia', serif;
-    --font-mono: 'JetBrains Mono', 'Courier New', monospace;
+    /* The web fonts (see FONTS) come first and are only used when loaded
+       or installed; otherwise the local fonts after them */
+    --font-display: 'Playfair Display', Literata, Charter, 'Bitstream Charter', Georgia, serif;
+    --font-body: 'Libre Baskerville', Literata, Charter, 'Bitstream Charter', Georgia, serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, Menlo, Consolas, 'Courier New', monospace;
 
     /* Spacing */
     --space-xs: 4px;

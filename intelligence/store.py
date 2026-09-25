@@ -450,6 +450,20 @@ class StoryStore:
         stories.sort(key=lambda s: s['score'], reverse=True)
         return stories[:limit]
 
+    def top_stories_page(self, max_age_hours: int, limit: int, offset: int, page_size: int,
+                         min_sources: int = 1, earlier_max: int = EARLIER_ARTICLES_MAX,
+                         exclude_patterns: Iterable[str] = ()) -> tuple:
+        """
+        Return (stories, total): one page of the ranked top_stories.
+
+        total counts all stories up to limit, so the pages cover exactly
+        what top_stories returns; stories holds at most page_size of them,
+        starting at offset.
+        """
+        stories = self.top_stories(max_age_hours, limit, min_sources, earlier_max,
+                                   exclude_patterns)
+        return stories[offset:offset + page_size], len(stories)
+
     def get_story(self, story_id: str, max_age_hours: int,
                   earlier_max: int = EARLIER_ARTICLES_MAX) -> Optional[dict]:
         """
@@ -500,7 +514,32 @@ class StoryStore:
             'source_count': len({_feed_key(a) for a in articles}),
             'earlier_articles': earlier[:max(earlier_max, 0)],
             'earlier_count': len(earlier),
+            'duplicate_count': sum(1 for a in articles if a['is_duplicate']),
         }
+
+
+def select_coverage(story: dict, n: int) -> list:
+    """
+    Pick up to n articles to list under a story's headline.
+
+    Every other source gets one slot first (its newest article, newest
+    sources first); the headline's own feed and further articles of the
+    same feeds only fill the remaining slots. Duplicates are left out:
+    they repeat an article that is already listed.
+    """
+    headline = story.get('headline') or {}
+    candidates = [a for a in story['articles']
+                  if a['id'] != headline.get('id') and not a['is_duplicate']]
+    seen = {_feed_key(headline)} if headline else set()
+    first, rest = [], []
+    for article in candidates:  # newest first
+        key = _feed_key(article)
+        if key in seen:
+            rest.append(article)
+        else:
+            seen.add(key)
+            first.append(article)
+    return (first + rest)[:max(n, 0)]
 
 
 def _entry_row(entry: dict, fetched_at: datetime) -> dict:

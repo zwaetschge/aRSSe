@@ -97,10 +97,13 @@ Die Miniflux-API kann keine Tags oder eigenen Metadaten schreiben – deshalb br
 
 | Pfad | Inhalt |
 |------|--------|
-| `/` | Top Stories aus mindestens zwei Feeds, gerankt nach Anzahl der Quellen und Aktualität – gezählt wird nur, was im Zeitfenster (24 Stunden) erschienen ist |
-| `/story/<id>` | Alle Artikel einer Story im Zeitfenster, darunter bis zu 20 ältere als „Frühere Berichte“ (mit Link auf das Original) |
-| `/api/stories` | Dieselben Daten als JSON |
+| `/` | Top Stories aus mindestens zwei Feeds, gerankt nach Anzahl der Quellen und Aktualität – gezählt wird nur, was im Zeitfenster (24 Stunden) erschienen ist. 10 Stories pro Seite (`?seite=2` usw.), insgesamt bis zu 100; `?auto=1` lädt die Seite alle 30 Minuten neu (für Always-on-Displays) |
+| `/story/<id>` | Alle Artikel einer Story im Zeitfenster mit erster und letzter Meldung, gleichlautende Meldungen zusammengeklappt, darunter bis zu 20 ältere als „Frühere Berichte“ (mit Link auf das Original). `?ansicht=chronologisch` zeigt den Verlauf von der ersten Meldung an, nach Tagen gruppiert |
+| `/api/stories` | Dieselben Daten als JSON (alle Stories, ohne Seiten) |
 | `/healthz` | `200`, solange der letzte erfolgreiche Lauf weniger als drei Intervalle zurückliegt (immer ohne Anmeldung) |
+| `/static/…` | Manifest und Icons für den Startbildschirm (immer ohne Anmeldung, Browser holen sie ohne Zugangsdaten) |
+
+Die Seiten sind für E-Ink gebaut: kurze Seiten statt langem Scrollen, nur absolute Uhrzeiten („Stand 18:32“, „Mi 14:53“ – relative Angaben wie „vor 5 Min.“ stimmen auf einem stehenden Bildschirm bald nicht mehr), jede Quelle zuerst mit einem Artikel statt mehrerer aus demselben Feed, und Links, die als ganze Zeile mindestens 44 px hoch antippbar sind. Die Uhrzeiten gelten in der Zeitzone `TZ` aus `.env` (Standard Europe/Berlin) oder `web.timezone` in `config.yaml`.
 
 Links führen in Miniflux (`BASE_URL`), damit Gelesen-Status und Volltext erhalten bleiben. Zeigt `BASE_URL` auf `localhost`, verwenden die Links stattdessen die Adresse, unter der die Top Stories aufgerufen wurden, mit `MINIFLUX_PORT` (beim Start erscheint dazu eine Warnung im Log).
 
@@ -125,6 +128,8 @@ scheduling:
   interval_minutes: 30           # Ausführungsintervall
 
 web:
+  page_size: 10                  # Stories pro Seite (WEB_PAGE_SIZE)
+  max_stories: 100               # insgesamt, über alle Seiten
   exclude_patterns: ['^Wetter\b']  # Stories nur aus solchen Titeln nicht anzeigen
 ```
 
@@ -154,7 +159,7 @@ Das Custom CSS für E-Ink-Displays berücksichtigt:
 - **Große Touch-Targets**: Mobile-freundliche Bedienung
 - **Pagination statt Scrolling**: Weniger Refreshes
 
-Beide Themes (`css/eink-theme.css`, `css/color-theme.css`) werden in Miniflux unter *Einstellungen > Benutzerdefiniertes CSS* eingefügt. Sie laden Google Fonts – die Content-Security-Policy von Miniflux blockiert das, bis Sie unter *Einstellungen > Externe Schriftart-Hosts* `fonts.googleapis.com fonts.gstatic.com` eintragen. Ohne diesen Eintrag greifen die System-Fallback-Schriften.
+Beide Themes (`css/eink-theme.css`, `css/color-theme.css`) werden in Miniflux unter *Einstellungen > Benutzerdefiniertes CSS* eingefügt. Sie verwenden die Schriften des Geräts (Literata, Charter oder Georgia) und laden nichts von fremden Servern – unter *Einstellungen > Externe Schriftart-Hosts* ist nichts einzutragen. Wer die ursprünglichen Web-Fonts möchte, entfernt die Kommentarzeichen um die `@import`-Zeile am Anfang der Datei und trägt dort `fonts.googleapis.com fonts.gstatic.com` ein; dann ruft jede Miniflux-Seite Google auf (IP-Adresse, Uhrzeit), und E-Ink-Geräte bauen die Seite langsamer auf.
 
 ## Verzeichnisstruktur
 
@@ -172,6 +177,7 @@ aRSSe/
 │   ├── store.py            # SQLite-Story-Datenbank
 │   ├── web.py              # Top-Stories-Oberfläche
 │   ├── templates/          # HTML-Templates
+│   ├── static/             # Manifest und Icons für den Startbildschirm
 │   ├── config.py           # Konfigurationsmodul
 │   ├── config.yaml         # Service-Konfiguration
 │   └── tests/              # pytest-Suite
@@ -182,6 +188,7 @@ aRSSe/
 │   └── miniflux.xml        # Unraid CA Template
 ├── scripts/
 │   ├── setup.sh            # Initialisierungsskript
+│   ├── make-icons.py       # Erzeugt die Icons in intelligence/static
 │   ├── test-setup.sh       # Test für setup.sh (ohne Docker)
 │   └── integration-test.sh # Stack-Test gegen echtes Miniflux
 └── tests/integration/      # Feeds und Compose-Override für den Stack-Test
@@ -196,6 +203,8 @@ Miniflux funktioniert als PWA. Auf E-Ink-Android-Geräten (z.B. Boox Palma):
 1. Öffnen Sie die Miniflux-URL im Browser (EinkBro oder Chrome)
 2. Wählen Sie "Zum Startbildschirm hinzufügen"
 3. Die App verhält sich dann wie eine native Anwendung
+
+Die Top Stories lassen sich genauso auf den Startbildschirm legen (eigenes Icon, Name „aRSSe“). Als eigenständige App ohne Adressleiste installiert Chrome sie nur über HTTPS (siehe [Reverse Proxy](#reverse-proxy-https)); unter `http://tower:8081` entsteht eine Verknüpfung, die im Browser öffnet. Einen Service Worker gibt es nicht – die Seiten bleiben ohne JavaScript und brauchen eine Verbindung zum Server. Für ein Always-on-Display (z.B. ein E-Ink-Tablet an der Wand) die Adresse mit `?auto=1` öffnen: Die Seite lädt sich dann alle 30 Minuten neu.
 
 ### Native Apps
 
@@ -219,7 +228,7 @@ WEB_USERNAME=leser
 WEB_PASSWORD=ein-langes-passwort
 ```
 
-Danach `docker compose up -d intelligence`. Statt `WEB_PASSWORD` geht auch `WEB_PASSWORD_FILE` mit dem Pfad einer Datei im Container (siehe [Passwörter als Datei](#passwörter-und-api-key-als-datei-docker-secret)). `/healthz` bleibt ohne Anmeldung erreichbar, der Health Check von Docker braucht es. Basic Auth überträgt das Passwort nur Base64-kodiert – außerhalb des Heimnetzes also nur über HTTPS (Reverse Proxy, siehe unten).
+Danach `docker compose up -d intelligence`. Statt `WEB_PASSWORD` geht auch `WEB_PASSWORD_FILE` mit dem Pfad einer Datei im Container (siehe [Passwörter als Datei](#passwörter-und-api-key-als-datei-docker-secret)). `/healthz` bleibt ohne Anmeldung erreichbar, der Health Check von Docker braucht es, ebenso `/static/` (Manifest und Icons für den Startbildschirm, ohne Inhalte aus Ihren Feeds). Basic Auth überträgt das Passwort nur Base64-kodiert – außerhalb des Heimnetzes also nur über HTTPS (Reverse Proxy, siehe unten).
 
 **Über den Reverse Proxy** (z.B. Authelia, Authentik oder `auth_basic` in nginx): Mit `WEB_AUTH_MODE=proxy` erwarten die Top Stories den angemeldeten Benutzer im Header `Remote-User` (`WEB_AUTH_PROXY_HEADER`, nur Buchstaben, Ziffern und `-` – Header mit `_` verwirft der Webserver) und glauben ihn nur von den Adressen in `WEB_TRUSTED_PROXIES`. Anfragen von anderen Adressen oder ohne den Header lehnt der Dienst mit `403` ab.
 

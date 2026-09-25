@@ -39,6 +39,15 @@ from store import (MAX_TITLE_CHARS, ClusterResult, FetchResult, StoreTooNewError
 logger = logging.getLogger('arsse-intelligence')
 
 SNIPPET_LENGTH = 280
+# Shorter snippets say nothing ('Video', 'Liveblog') and are not shown
+MIN_SNIPPET_CHARS = 20
+# Teaser links at the end of feed texts: '[ mehr ]' (Tagesschau, MDR),
+# '. mehr...' (taz), 'Weiterlesen'. A bare 'mehr' only counts after the
+# end of a sentence, so 'gibt es nicht mehr' stays intact.
+_TEASER_TAIL = re.compile(
+    r'(?:\s*\[\s*mehr\s*\]|\s*\bweiterlesen\W*'
+    r'|(?:^|(?<=[.!?:"“”»)]))\s*mehr\s*(?:\.{2,}|…|»|›)?)\s*$',
+    re.IGNORECASE)
 # Long articles add little signal but cost a lot of vectorization time
 MAX_CONTENT_CHARS = 5000
 # HTML beyond this is not even parsed: a broken or hostile feed item of
@@ -350,7 +359,8 @@ class NewsClusterer:
         if content:
             content = BeautifulSoup(content, 'lxml').get_text(separator=' ')
         content = re.sub(r'\s+', ' ', content).strip()
-        entry['_snippet'] = _truncate(content, SNIPPET_LENGTH)
+        # Cleaned before cutting, so a teaser link cannot survive half cut
+        entry['_snippet'] = _truncate(clean_snippet(content, title), SNIPPET_LENGTH)
         entry['_text_len'] = len(content)
         body = _normalize(content[:MAX_CONTENT_CHARS])
         entry['_body'] = body
@@ -632,6 +642,32 @@ def _norm_url(url) -> str:
 def _feed_id(entry: dict):
     """The feed an entry belongs to."""
     return entry.get('feed_id') or (entry.get('feed') or {}).get('id')
+
+
+def clean_snippet(text: str, title: str = '') -> str:
+    """
+    Make an article's plain text fit to show as its snippet.
+
+    Removes the teaser links feeds append ('[ mehr ]', 'mehr...',
+    'Weiterlesen'), and returns '' for text that says nothing: the literal
+    'None' some feeds send, fewer than MIN_SNIPPET_CHARS characters, or
+    just the title again.
+    """
+    text = text.strip()
+    while True:
+        stripped = _TEASER_TAIL.sub('', text).rstrip()
+        if stripped == text:
+            break
+        text = stripped
+    if len(text) < MIN_SNIPPET_CHARS or text.lower() in ('none', 'null'):
+        return ''
+    if _comparable(text) == _comparable(title):
+        return ''
+    return text
+
+
+def _comparable(text: str) -> str:
+    return re.sub(r'\W+', ' ', text).strip().casefold()
 
 
 def _truncate(text: str, length: int) -> str:

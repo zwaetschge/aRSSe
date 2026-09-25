@@ -4,9 +4,10 @@
 # ===========================================
 # Startet den kompletten Stack mit einem echten Miniflux, abonniert
 # synthetische Feeds als Benutzer ohne Admin-Rechte und prüft, dass Stories
-# entstehen, Duplikate in Miniflux als gelesen markiert werden und die
-# Absicherung greift (Passwortschutz, Sicherheits-Header, /metrics aus,
-# fremde Host-Header). Kollidiert nicht mit einem
+# entstehen, Duplikate in Miniflux als gelesen markiert werden, die
+# Startseite absolute Uhrzeiten und die Dateien für den Startbildschirm
+# liefert und die Absicherung greift (Passwortschutz, Sicherheits-Header,
+# /metrics aus, fremde Host-Header). Kollidiert nicht mit einem
 # laufenden Produktions-Stack (eigene Namen, Ports und Datenverzeichnisse).
 #
 # Varianten (Umgebungsvariablen):
@@ -163,6 +164,25 @@ CODE=$(http_code "http://localhost:$MF_PORT/metrics")
 echo "    Miniflux /metrics: $CODE"
 [ "$CODE" != 200 ] || { echo "Miniflux serves /metrics by default"; exit 1; }
 
+step "Checking the E-Ink front page and home-screen files"
+HTML=$(curl -fsS "http://localhost:$IT_PORT/")
+# Absolute times need the time zone data in the image (tzdata)
+grep -q 'Stand <time datetime="' <<< "$HTML" \
+    || { echo "No absolute time ('Stand HH:MM') on the front page"; exit 1; }
+if grep -q "is not a time zone name" <<< "$LOGS"; then
+    echo "TZ=Europe/Berlin not found in the image"; exit 1
+fi
+if grep -q "<script" <<< "$HTML"; then echo "The front page contains a script"; exit 1; fi
+CODE=$(http_code "http://localhost:$IT_PORT/?seite=999")
+[ "$CODE" = 404 ] || { echo "Expected 404 for a page beyond the last, got $CODE"; exit 1; }
+curl -fsS "http://localhost:$IT_PORT/static/manifest.webmanifest" \
+    | json 'd["start_url"]' | grep -qx '/' \
+    || { echo "Web app manifest missing or without start_url /"; exit 1; }
+for FILE in static/icon-192.png static/icon-512.png static/icon.svg favicon.ico; do
+    CODE=$(http_code "http://localhost:$IT_PORT/$FILE")
+    [ "$CODE" = 200 ] || { echo "Expected 200 for /$FILE, got $CODE"; exit 1; }
+done
+
 step "Protecting Top Stories with a password (WEB_AUTH_MODE=basic)"
 cat >> "$WORK/.env" <<ENV
 WEB_AUTH_MODE=basic
@@ -181,6 +201,11 @@ grep -q "Bundestag beschließt Haushalt" <<< "$HTML" \
     || { echo "Top Stories not shown with the right password"; exit 1; }
 curl -fsS "http://localhost:$IT_PORT/healthz" > /dev/null \
     || { echo "/healthz must stay reachable without credentials"; exit 1; }
+# Browsers fetch the manifest without credentials; the pages stay protected
+curl -fsS "http://localhost:$IT_PORT/static/manifest.webmanifest" > /dev/null \
+    || { echo "The web app manifest must be reachable without credentials"; exit 1; }
+CODE=$(http_code "http://localhost:$IT_PORT/?seite=1")
+[ "$CODE" = 401 ] || { echo "Expected 401 for ?seite=1 without credentials, got $CODE"; exit 1; }
 CODE=$(http_code -u "leser:$WEB_PASSWORD" -H "Host: rebind.example:$IT_PORT" "http://localhost:$IT_PORT/")
 [ "$CODE" = 400 ] || { echo "Expected 400 for a foreign Host header, got $CODE"; exit 1; }
 

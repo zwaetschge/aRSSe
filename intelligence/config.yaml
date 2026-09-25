@@ -141,8 +141,11 @@ storage:
 # Top-Stories-Weboberfläche
 web:
   # Der Port ist fest 8081 im Container; extern über INTELLIGENCE_PORT in .env
-  # Maximale Anzahl angezeigter Stories
-  max_stories: 50
+  # Maximale Anzahl angezeigter Stories (über alle Seiten)
+  max_stories: 100
+  # Stories pro Seite (?seite=2 usw.); kurze Seiten brauchen auf E-Ink-Readern
+  # kein Scrollen (WEB_PAGE_SIZE)
+  page_size: 10
   # Weitere Artikel pro Story auf der Startseite (0 = nur die Schlagzeile)
   articles_per_story: 6
   # Nur Stories aus mindestens so vielen Feeds anzeigen
@@ -162,8 +165,12 @@ web:
   # immer. Keine Platzhalter (*.example.com). Leer = jeder Hostname
   # (WEB_ALLOWED_HOSTS, kommagetrennt)
   allowed_hosts: []
+  # Zeitzone der angezeigten Uhrzeiten, z.B. "Europe/Vienna".
+  # Leer = TZ aus .env (Standard Europe/Berlin)
+  timezone: ""
 
-  # Zugriffsschutz (README, Abschnitt "Absicherung"). /healthz bleibt offen.
+  # Zugriffsschutz (README, Abschnitt "Absicherung"). /healthz und /static/
+  # (Manifest und Icons für den Startbildschirm) bleiben offen.
   auth:
     # "none":  offen für alle, die den Port erreichen (beim Start: Warnung)
     # "basic": Anmeldung mit username/password (HTTP Basic Auth)

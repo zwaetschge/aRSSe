@@ -119,6 +119,7 @@ services:
       - WEB_AUTH_PROXY_HEADER=${WEB_AUTH_PROXY_HEADER:-}
       - WEB_TRUSTED_PROXIES=${WEB_TRUSTED_PROXIES:-}
       - WEB_ALLOWED_HOSTS=${WEB_ALLOWED_HOSTS:-}
+      - WEB_PAGE_SIZE=${WEB_PAGE_SIZE:-}
       - TZ=${TZ:-Europe/Berlin}
       # Der Container startet als root, übergibt ${DATA_PATH}/intelligence an
       # PUID:PGID (Unraid: 99:100) und läuft danach ohne Root-Rechte
