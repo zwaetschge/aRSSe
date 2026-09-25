@@ -117,7 +117,8 @@ web:
   earlier_articles_max: 20
   # Nur Anfragen an diese Hostnamen beantworten (Schutz vor DNS-Rebinding),
   # z.B. ["tower.local", "192.168.1.10"]. localhost und 127.0.0.1 gehen
-  # immer. Leer = jeder Hostname (WEB_ALLOWED_HOSTS, kommagetrennt)
+  # immer. Keine Platzhalter (*.example.com). Leer = jeder Hostname
+  # (WEB_ALLOWED_HOSTS, kommagetrennt)
   allowed_hosts: []
 
   # Zugriffsschutz (README, Abschnitt "Absicherung"). /healthz bleibt offen.
@@ -133,9 +134,10 @@ web:
     username: ""
     password: ""
     password_file: ""
-    # Für "proxy": Header mit dem Benutzernamen (WEB_AUTH_PROXY_HEADER) und
-    # die Adressen des Proxys (WEB_TRUSTED_PROXIES), z.B. ["172.18.0.5/32"].
-    # Von allen anderen Adressen wird die Anfrage abgelehnt.
+    # Für "proxy": Header mit dem Benutzernamen (WEB_AUTH_PROXY_HEADER, nur
+    # Buchstaben, Ziffern und "-") und die Adressen des Proxys
+    # (WEB_TRUSTED_PROXIES), z.B. ["172.18.0.5/32"]; 0.0.0.0/0 wird
+    # abgelehnt. Von allen anderen Adressen wird die Anfrage abgelehnt.
     proxy_header: "Remote-User"
     trusted_proxies: []
 

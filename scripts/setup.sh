@@ -420,12 +420,25 @@ maybe_start_services() {
 print_next_steps() {
     echo -e "${BLUE}Nächste Schritte:${NC}\n"
 
-    local host port intelligence_port
+    local host port intelligence_port intelligence_host local_only auth_mode
     host="${IP:-<server-ip>}"
     port=$(miniflux_port)
     intelligence_port=$(env_get INTELLIGENCE_PORT)
+    # INTELLIGENCE_PORT=127.0.0.1:8081 veröffentlicht nur auf dieser Adresse
+    intelligence_host="$host"
+    case "$intelligence_port" in
+        *:*) intelligence_host="${intelligence_port%:*}" ;;
+    esac
+    case "$intelligence_host" in
+        0.0.0.0|::|"[::]"|"") intelligence_host="$host" ;;
+    esac
+    local_only=false
+    case "$intelligence_host" in
+        127.*|localhost|"[::1]") local_only=true ;;
+    esac
     intelligence_port="${intelligence_port##*:}"
     intelligence_port="${intelligence_port:-8081}"
+    auth_mode=$(env_get WEB_AUTH_MODE)
 
     echo "1. Öffnen Sie Miniflux im Browser:"
     echo -e "   ${GREEN}http://$host:$port${NC}"
@@ -449,8 +462,12 @@ print_next_steps() {
     echo "6. (Optional) Starten Sie den Intelligence Layer (Top Stories):"
     echo "   a. Tragen Sie den API-Key in .env ein (MINIFLUX_API_KEY=...)"
     echo "   b. $COMPOSE_CMD up -d intelligence"
-    echo -e "   c. Top Stories: ${GREEN}http://$host:$intelligence_port${NC}"
-    echo "   Ohne WEB_AUTH_MODE in .env kann jeder im Netz die Top Stories lesen"
+    echo -e "   c. Top Stories: ${GREEN}http://$intelligence_host:$intelligence_port${NC}"
+    if [ "$local_only" = true ]; then
+        echo "   Nur auf dem Server selbst bzw. über den Reverse Proxy erreichbar"
+    elif [ -z "$auth_mode" ] || [ "$auth_mode" = "none" ]; then
+        echo "   Ohne WEB_AUTH_MODE in .env kann jeder im Netz die Top Stories lesen"
+    fi
     echo "   Links in den Top Stories führen zu BASE_URL: $(env_get BASE_URL)"
     echo ""
     echo -e "${BLUE}Nützliche Befehle:${NC}"

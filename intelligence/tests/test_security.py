@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from config import load_config
 from conftest import FakeClient, sample_entries
 from news_clustering import NewsClusterer, check_api_key_user
 from store import ClusterResult
@@ -105,6 +106,17 @@ def test_allowed_hosts_block_dns_rebinding(config, store):
     for host in ('tower.local', 'TOWER.local:8081', 'localhost', 'localhost:8081',
                  '127.0.0.1', '127.0.0.1:8081', '[::1]:8081'):
         assert http.get('/', headers={'Host': host}).status_code == 200, host
+
+
+def test_allowed_hosts_match_what_browsers_send(monkeypatch, store):
+    # IDN names arrive as punycode, IPv6 addresses in brackets (503: no cycle yet)
+    for var in ('WEB_AUTH_MODE', 'WEB_TRUSTED_PROXIES', 'WEB_AUTH_PROXY_HEADER'):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv('WEB_ALLOWED_HOSTS', 'büro.local,fd00::10')
+    http = create_app(load_config(None), store).test_client()
+    for host in ('xn--bro-hoa.local', 'XN--BRO-HOA.local:8081', '[fd00::10]:8081'):
+        assert http.get('/healthz', headers={'Host': host}).status_code != 400, host
+    assert http.get('/healthz', headers={'Host': '[fd00::11]'}).status_code == 400
 
 
 def test_any_host_is_accepted_without_allowed_hosts(config, store):

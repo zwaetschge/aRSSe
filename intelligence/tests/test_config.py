@@ -286,3 +286,46 @@ def test_miniflux_api_key_file(tmp_path, web_env):
     web_env.setenv('MINIFLUX_API_KEY_FILE', str(tmp_path / 'fehlt'))
     with pytest.raises(ConfigError, match='MINIFLUX_API_KEY_FILE'):
         load_config(None)
+
+
+def test_allowed_hosts_ipv6_and_idn(web_env):
+    # Browsers send IDN names as punycode and IPv6 hosts in brackets
+    web_env.setenv('WEB_ALLOWED_HOSTS', 'Büro.local, fd00::10, [FD00:0::11]:8081')
+    assert load_config(None).web.allowed_hosts == ['xn--bro-hoa.local', 'fd00::10',
+                                                   'fd00::11']
+
+
+@pytest.mark.parametrize('hosts', ['*', '*.example.com', '.example.com', 'tower..local'])
+def test_allowed_hosts_wildcards_are_rejected(web_env, hosts):
+    # Accepted before, but then no real Host header ever matched
+    web_env.setenv('WEB_ALLOWED_HOSTS', hosts)
+    with pytest.raises(ConfigError, match='web.allowed_hosts'):
+        load_config(None)
+
+
+@pytest.mark.parametrize('header', ['X_Remote_User', 'Remote User', 'Remote-User:'])
+def test_proxy_header_waitress_would_drop_is_rejected(web_env, header):
+    # waitress discards request headers whose name contains '_'
+    web_env.setenv('WEB_AUTH_MODE', 'proxy')
+    web_env.setenv('WEB_TRUSTED_PROXIES', '172.30.0.10')
+    web_env.setenv('WEB_AUTH_PROXY_HEADER', header)
+    with pytest.raises(ConfigError, match='proxy_header'):
+        load_config(None)
+
+
+def test_trusted_proxies_must_not_cover_everyone(web_env, caplog):
+    web_env.setenv('WEB_AUTH_MODE', 'proxy')
+    for everyone in ('0.0.0.0/0', '::/0'):
+        web_env.setenv('WEB_TRUSTED_PROXIES', f'172.30.0.10,{everyone}')
+        with pytest.raises(ConfigError, match='trusted_proxies'):
+            load_config(None)
+    # Public networks are allowed, but unusual enough for a warning
+    web_env.setenv('WEB_TRUSTED_PROXIES', '8.8.8.0/24')
+    with caplog.at_level('WARNING'):
+        assert load_config(None).web.auth.trusted_proxies == ['8.8.8.0/24']
+    assert '8.8.8.0/24' in caplog.text
+    caplog.clear()
+    web_env.setenv('WEB_TRUSTED_PROXIES', '172.18.0.1/32')
+    with caplog.at_level('WARNING'):
+        load_config(None)
+    assert 'trusted_proxies' not in caplog.text

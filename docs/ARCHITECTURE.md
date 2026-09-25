@@ -278,6 +278,10 @@ Hook prüft jede Anfrage in dieser Reihenfolge:
    antwortet sonst mit `401` und `WWW-Authenticate: Basic realm="aRSSe"`. `proxy` glaubt
    den Header (`Remote-User`) nur, wenn die TCP-Gegenstelle in `trusted_proxies` liegt,
    sonst `403`. `none` (Standard) lässt alles durch und warnt beim Start im Log.
+   `load_config` lehnt ab, was nie funktionieren oder alle hereinlassen würde:
+   `trusted_proxies` mit Präfix `/0`, Header-Namen mit `_` (waitress verwirft solche
+   Header) und Platzhalter in `allowed_hosts`. IDN-Namen werden dort zu Punycode, IP-
+   Adressen (auch IPv6 ohne Klammern) zu ihrer Kurzform – so, wie Browser sie senden.
 3. *CSRF:* Für alles außer GET/HEAD/OPTIONS muss `Sec-Fetch-Site` `same-origin` oder
    `none` sein; ältere Browser ohne diesen Header müssen `Origin` bzw. `Referer` mit dem
    aufgerufenen Host senden (`require_same_origin`). Basic Auth allein schützt nicht, weil

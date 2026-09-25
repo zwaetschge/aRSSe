@@ -206,4 +206,26 @@
     Display="advanced"
     Required="false"
     Mask="false">172.16.0.0/12</Config>
+
+  <Config
+    Name="Metrics Username"
+    Target="METRICS_USERNAME"
+    Default=""
+    Mode=""
+    Description="Benutzername für /metrics (HTTP Basic Auth). Nur zusammen mit dem Passwort setzen - leer = ohne Anmeldung."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false"></Config>
+
+  <Config
+    Name="Metrics Password"
+    Target="METRICS_PASSWORD"
+    Default=""
+    Mode=""
+    Description="Passwort für /metrics. Nur zusammen mit dem Benutzernamen setzen."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="true"></Config>
 </Container>

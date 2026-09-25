@@ -93,6 +93,7 @@ check_fresh_env() {
     [ "$(stat -c %a "$PROJ/.env")" = 600 ] || fail ".env hat Rechte $(stat -c %a "$PROJ/.env")"
     [ "$(env_value BASE_URL)" = "http://192.0.2.7:8080" ] || fail "BASE_URL ist $(env_value BASE_URL)"
     grep -q "Admin-Benutzer: admin" <<< "$OUT" || fail "Admin-Benutzer fehlt"
+    grep -q "kann jeder im Netz die Top Stories" <<< "$OUT" || fail "Hinweis auf offene Top Stories fehlt"
     [ -d "$PROJ/data/postgresql" ] || fail "Datenverzeichnis postgresql fehlt"
     [ -d "$PROJ/data/intelligence" ] || fail "Datenverzeichnis intelligence fehlt"
     ! grep -q " up " "$DOCKER_LOG" || fail "Services wurden ohne --yes gestartet"
@@ -210,7 +211,17 @@ run_setup --no-start
 [ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS"
 [ "$(env_value BASE_URL)" = "http://192.0.2.7:8090" ] || fail "BASE_URL ist $(env_value BASE_URL)"
 grep -q "http://192.0.2.7:8090" <<< "$OUT" || fail "Adresse in 'Nächste Schritte' falsch"
-grep -q "http://192.0.2.7:8091" <<< "$OUT" || fail "Top-Stories-Adresse in 'Nächste Schritte' falsch"
+grep -q "http://127.0.0.1:8091" <<< "$OUT" || fail "Top-Stories-Adresse in 'Nächste Schritte' falsch"
+grep -q "Nur auf dem Server selbst" <<< "$OUT" || fail "Hinweis auf lokale Top Stories fehlt"
+if grep -q "kann jeder im Netz" <<< "$OUT"; then fail "Warnung trotz 127.0.0.1"; fi
+
+step "Top Stories mit WEB_AUTH_MODE: keine Warnung, Adresse mit Server-IP"
+new_project webauth
+printf 'WEB_AUTH_MODE=basic\nINTELLIGENCE_PORT=8092\n' >> "$PROJ/.env.example"
+run_setup --no-start
+[ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS"
+grep -q "http://192.0.2.7:8092" <<< "$OUT" || fail "Top-Stories-Adresse in 'Nächste Schritte' falsch"
+if grep -q "kann jeder im Netz" <<< "$OUT"; then fail "Warnung trotz WEB_AUTH_MODE=basic"; fi
 
 step "Ältere .env wird ergänzt, eigene Werte bleiben"
 new_project upgrade

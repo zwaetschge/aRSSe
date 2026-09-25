@@ -374,17 +374,52 @@ def _string_list(name: str, value) -> list:
 
 
 def _host_name(name: str, value: str) -> str:
-    """Normalize an allowed host ('Tower.local:8081', '[fd00::1]') to its name."""
+    """
+    Normalize an allowed host ('Tower.local:8081', '[fd00::1]') to the name
+    the Host header carries: IP addresses in their short form, IDN names as
+    punycode (browsers send 'xn--bro-hoa.local' for 'büro.local').
+    """
+    if '*' in value or value.startswith('.'):
+        raise ConfigError(f"{name}: '{value}' - wildcards are not supported, "
+                          f"list every host name")
+    try:
+        # A bare IPv6 address: its colons would be read as a port
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        pass
     try:
         parts = urlsplit(f'//{value}')
         parts.port  # raises ValueError for 'tower.local:abc'
         host = parts.hostname if '/' not in value else None
     except ValueError:
         host = None
+    if host:
+        try:
+            return str(ipaddress.ip_address(host))
+        except ValueError:
+            pass
+        try:
+            host = host.encode('idna').decode('ascii')
+        except UnicodeError:
+            host = None  # empty label as in 'tower..local'
     if not host:
         raise ConfigError(f"{name}: '{value}' is not a host name "
                           f"(e.g. tower.local, without http://)")
     return host
+
+
+def _trusted_network(value: str):
+    """Parse one web.auth.trusted_proxies entry; refuse to trust everyone."""
+    try:
+        network = ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        raise ConfigError(f"web.auth.trusted_proxies: '{value}' is not an IP "
+                          f"address or network (e.g. 172.30.0.10/32)") from None
+    if network.prefixlen == 0:
+        # Anyone could send the user header and log in as anybody
+        raise ConfigError(f"web.auth.trusted_proxies: '{value}' trusts every address; "
+                          f"enter the address of your reverse proxy")
+    return network
 
 
 def _validate_web_auth(config: Config) -> None:
@@ -394,12 +429,7 @@ def _validate_web_auth(config: Config) -> None:
                          _string_list('web.allowed_hosts', web.allowed_hosts)]
     auth = web.auth
     auth.trusted_proxies = _string_list('web.auth.trusted_proxies', auth.trusted_proxies)
-    for network in auth.trusted_proxies:
-        try:
-            ipaddress.ip_network(network, strict=False)
-        except ValueError:
-            raise ConfigError(f"web.auth.trusted_proxies: '{network}' is not an IP "
-                              f"address or network (e.g. 172.30.0.10/32)") from None
+    networks = [_trusted_network(network) for network in auth.trusted_proxies]
     for name in ('mode', 'username', 'password', 'password_file', 'proxy_header'):
         if not isinstance(getattr(auth, name), str):
             raise ConfigError(f"web.auth.{name} must be a string, "
@@ -421,8 +451,17 @@ def _validate_web_auth(config: Config) -> None:
         if not auth.trusted_proxies:
             raise ConfigError("web.auth.mode 'proxy' needs web.auth.trusted_proxies "
                               "(WEB_TRUSTED_PROXIES), the address of your reverse proxy")
-        if not auth.proxy_header.strip():
-            raise ConfigError("web.auth.proxy_header must not be empty")
+        auth.proxy_header = auth.proxy_header.strip()
+        # waitress drops headers whose name contains '_' (spoofing guard)
+        if not re.fullmatch(r'[A-Za-z0-9-]+', auth.proxy_header):
+            raise ConfigError(f"web.auth.proxy_header must be a header name of letters, "
+                              f"digits and '-' (e.g. Remote-User), got "
+                              f"'{auth.proxy_header}'")
+        for network in networks:
+            if not network.is_private:
+                logger.warning("web.auth.trusted_proxies: %s is not a private network; "
+                               "every address in it can log in as anybody by sending "
+                               "the %s header", network, auth.proxy_header)
 
 
 def _validate(config: Config) -> None:

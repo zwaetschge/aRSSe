@@ -208,11 +208,15 @@ WEB_USERNAME=leser
 WEB_PASSWORD=ein-langes-passwort
 ```
 
-Danach `docker compose up -d intelligence`. Statt `WEB_PASSWORD` geht auch `WEB_PASSWORD_FILE` mit dem Pfad einer Datei im Container (Docker Secret). `/healthz` bleibt ohne Anmeldung erreichbar, der Health Check von Docker braucht es. Basic Auth überträgt das Passwort nur Base64-kodiert – außerhalb des Heimnetzes also nur über HTTPS (Reverse Proxy, siehe unten).
+Danach `docker compose up -d intelligence`. Statt `WEB_PASSWORD` geht auch `WEB_PASSWORD_FILE` mit dem Pfad einer Datei im Container (siehe [Passwörter als Datei](#passwörter-und-api-key-als-datei-docker-secret)). `/healthz` bleibt ohne Anmeldung erreichbar, der Health Check von Docker braucht es. Basic Auth überträgt das Passwort nur Base64-kodiert – außerhalb des Heimnetzes also nur über HTTPS (Reverse Proxy, siehe unten).
 
-**Über den Reverse Proxy** (z.B. Authelia, Authentik oder `auth_basic` in nginx): Mit `WEB_AUTH_MODE=proxy` erwarten die Top Stories den angemeldeten Benutzer im Header `Remote-User` (`WEB_AUTH_PROXY_HEADER`) und glauben ihn nur von den Adressen in `WEB_TRUSTED_PROXIES` – tragen Sie dort genau die IP-Adresse des Proxys ein, kein ganzes Netz, und veröffentlichen Sie den Port nicht mehr im Netz (`INTELLIGENCE_PORT=127.0.0.1:8081` oder der Proxy im `arsse-network`, siehe unten). Anfragen von anderen Adressen lehnt der Dienst mit `403` ab.
+**Über den Reverse Proxy** (z.B. Authelia, Authentik oder `auth_basic` in nginx): Mit `WEB_AUTH_MODE=proxy` erwarten die Top Stories den angemeldeten Benutzer im Header `Remote-User` (`WEB_AUTH_PROXY_HEADER`, nur Buchstaben, Ziffern und `-` – Header mit `_` verwirft der Webserver) und glauben ihn nur von den Adressen in `WEB_TRUSTED_PROXIES`. Anfragen von anderen Adressen oder ohne den Header lehnt der Dienst mit `403` ab.
 
-**DNS-Rebinding:** Eine fremde Webseite kann ihren Namen auf die IP-Adresse Ihres Servers umbiegen und die Top Stories dann über Ihren Browser auslesen. `WEB_ALLOWED_HOSTS=tower.local,192.168.1.10` beantwortet nur Anfragen an diese Namen (`localhost` und `127.0.0.1` gehen immer), alle anderen mit `400`.
+- Den Header setzt der Proxy, nginx z.B. mit `proxy_set_header Remote-User $remote_user;` (bei `auth_basic`, siehe Beispiel unten); Authelia und Authentik liefern ihn über `auth_request` und `auth_request_set` (siehe deren nginx-Anleitung).
+- In `WEB_TRUSTED_PROXIES` gehört genau die Adresse, von der die Anfragen des Proxys im Container ankommen, kein ganzes Netz. Läuft nginx direkt auf dem Server, ist das nicht `127.0.0.1`, sondern wie bei `TRUSTED_PROXIES` das Gateway des `arsse-network` (Befehl unten); beim Proxy-Container dessen Adresse im `arsse-network`.
+- Veröffentlichen Sie den Port dann nicht mehr im Netz (`INTELLIGENCE_PORT=127.0.0.1:8081` oder der Proxy im `arsse-network`, siehe unten). Das ist Pflicht: Bei einem im Netz veröffentlichten Port können auch Anfragen anderer Geräte vom Gateway kommen (z.B. per IPv6 über Dockers Port-Proxy), und die könnten den Header selbst schicken.
+
+**DNS-Rebinding:** Eine fremde Webseite kann ihren Namen auf die IP-Adresse Ihres Servers umbiegen und die Top Stories dann über Ihren Browser auslesen. `WEB_ALLOWED_HOSTS=tower.local,192.168.1.10` beantwortet nur Anfragen an diese Namen (`localhost` und `127.0.0.1` gehen immer), alle anderen mit `400`. Platzhalter wie `*.example.com` gibt es nicht – jeden Namen einzeln eintragen; IPv6-Adressen gehen mit oder ohne eckige Klammern.
 
 Unabhängig davon senden die Top Stories eine strikte Content-Security-Policy (kein JavaScript, keine fremden Inhalte, nicht in Frames einbettbar) und weitere Sicherheits-Header; Anfragen, die etwas verändern, nehmen sie nur von der eigenen Seite an (Schutz vor CSRF).
 
@@ -225,7 +229,34 @@ API-Keys von Miniflux gelten ohne Einschränkung für ihren Benutzer: Mit dem Ke
 3. Als `leser` unter *Einstellungen > API-Schlüssel* einen Key erzeugen und als `MINIFLUX_API_KEY` eintragen
 4. Zum Lesen `leser` verwenden, den Admin nur zur Verwaltung
 
-Die Top Stories zeigen die Feeds und den Gelesen-Status des Benutzers, dem der Key gehört. Gehört er einem Admin, warnt der Dienst beim Start im Log. Statt `MINIFLUX_API_KEY` geht auch `MINIFLUX_API_KEY_FILE` (Pfad zu einer Datei im Container, z.B. ein Docker Secret) – dann taucht der Key nicht in `docker inspect` auf.
+Die Top Stories zeigen die Feeds und den Gelesen-Status des Benutzers, dem der Key gehört. Gehört er einem Admin, warnt der Dienst beim Start im Log. Statt `MINIFLUX_API_KEY` geht auch `MINIFLUX_API_KEY_FILE` (Pfad zu einer Datei im Container, siehe nächster Abschnitt) – dann taucht der Key nicht in `docker inspect` auf.
+
+### Passwörter und API-Key als Datei (Docker Secret)
+
+`WEB_PASSWORD_FILE` und `MINIFLUX_API_KEY_FILE` nennen eine Datei *im Container*; Docker muss sie erst hineinlegen. Am einfachsten mit einer `docker-compose.override.yml` neben der `docker-compose.yml` (wird automatisch mitgelesen):
+
+```yaml
+services:
+  intelligence:
+    secrets:
+      - web_password
+      - miniflux_api_key
+
+secrets:
+  web_password:
+    file: ./secrets/web_password
+  miniflux_api_key:
+    file: ./secrets/miniflux_api_key
+```
+
+Dazu in `.env` `WEB_PASSWORD_FILE=/run/secrets/web_password` bzw. `MINIFLUX_API_KEY_FILE=/run/secrets/miniflux_api_key`. Der Dienst liest die Dateien erst nach dem Wechsel zu `PUID:PGID`, und ohne Docker Swarm behält Docker Besitzer und Rechte der Datei auf dem Server – sie muss also für `PUID` lesbar sein, sonst bricht der Container beim Start ab (`Permission denied` im Log):
+
+```bash
+mkdir -p secrets
+printf '%s' 'ein-langes-passwort' > secrets/web_password
+chmod 400 secrets/*
+sudo chown 1000:1000 secrets/*   # PUID:PGID, Unraid: 99:100
+```
 
 ### Reverse Proxy (HTTPS)
 
@@ -235,7 +266,7 @@ Für den Zugriff von außen gehört ein Reverse Proxy mit HTTPS vor beide Dienst
 # Miniflux
 server {
     listen 443 ssl;
-    http2 on;
+    http2 on;  # nginx vor 1.25.1: stattdessen "listen 443 ssl http2;"
     server_name news.example.com;
 
     ssl_certificate /etc/letsencrypt/live/news.example.com/fullchain.pem;
@@ -248,7 +279,9 @@ server {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Überschreiben statt anhängen: Miniflux nimmt die erste Adresse,
+        # und die käme sonst vom Client ($proxy_add_x_forwarded_for)
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
@@ -256,7 +289,7 @@ server {
 # Top Stories
 server {
     listen 443 ssl;
-    http2 on;
+    http2 on;  # nginx vor 1.25.1: stattdessen "listen 443 ssl http2;"
     server_name stories.example.com;
 
     ssl_certificate /etc/letsencrypt/live/stories.example.com/fullchain.pem;
@@ -270,8 +303,10 @@ server {
     location / {
         proxy_pass http://127.0.0.1:8081;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # Nur mit WEB_AUTH_MODE=proxy: angemeldeten Benutzer weitergeben
+        #proxy_set_header Remote-User $remote_user;
     }
 }
 ```
@@ -286,10 +321,12 @@ INTELLIGENCE_PORT=127.0.0.1:8081
 # Adresse, von der die Anfragen des Proxys bei Miniflux ankommen (siehe unten)
 TRUSTED_PROXIES=172.18.0.1/32
 WEB_ALLOWED_HOSTS=stories.example.com
+# Nur mit WEB_AUTH_MODE=proxy: dieselbe Adresse wie TRUSTED_PROXIES
+#WEB_TRUSTED_PROXIES=172.18.0.1/32
 ```
 
 - **`TRUSTED_PROXIES`:** Erst wenn Miniflux dem Proxy vertraut, glaubt es dessen `X-Forwarded-Proto: https` und markiert den Sitzungs-Cookie als `Secure`. Läuft nginx direkt auf dem Server, kommen seine Anfragen über die Docker-Portweiterleitung vom Gateway des `arsse-network`: `docker network inspect arsse-network -f '{{(index .IPAM.Config 0).Gateway}}'`. Danach die Anmeldung nur noch über die HTTPS-Adresse – den `Secure`-Cookie nimmt der Browser über `http://<server-ip>:8080` nicht an.
-- **Proxy als Container** (SWAG, Nginx Proxy Manager): `localhost` ist dort der Proxy-Container selbst. Hängen Sie ihn ans `arsse-network` (`docker network connect arsse-network swag`) und verwenden Sie `proxy_pass http://arsse-miniflux:8080` bzw. `http://arsse-intelligence:8081`; dann brauchen Miniflux und Top Stories gar keine veröffentlichten Ports (`127.0.0.1:…` genügt). `TRUSTED_PROXIES` bzw. `WEB_TRUSTED_PROXIES` ist dann die Adresse des Proxys im `arsse-network`: `docker inspect -f '{{with index .NetworkSettings.Networks "arsse-network"}}{{.IPAddress}}{{end}}' swag`. Achten Sie darauf, dass der Proxy den `Host`-Header weitergibt.
+- **Proxy als Container** (SWAG, Nginx Proxy Manager): `localhost` ist dort der Proxy-Container selbst. Hängen Sie ihn ans `arsse-network` (`docker network connect arsse-network swag`) und verwenden Sie `proxy_pass http://arsse-miniflux:8080` bzw. `http://arsse-intelligence:8081`; dann brauchen Miniflux und Top Stories gar keine veröffentlichten Ports (`127.0.0.1:…` genügt). `TRUSTED_PROXIES` bzw. `WEB_TRUSTED_PROXIES` ist dann die Adresse des Proxys im `arsse-network`: `docker inspect -f '{{with index .NetworkSettings.Networks "arsse-network"}}{{.IPAddress}}{{end}}' swag`. Diese Adresse kann sich ändern, wenn der Proxy-Container neu erstellt wird (z.B. bei Updates unter Unraid) – danach erneut prüfen: Mit einer veralteten Adresse antworten die Top Stories (bei `WEB_AUTH_MODE=proxy`) mit `403`, und Miniflux setzt den `Secure`-Cookie stillschweigend nicht mehr. Achten Sie darauf, dass der Proxy den `Host`-Header weitergibt und `X-Forwarded-For` überschreibt statt anhängt (sonst kann ein Client Miniflux eine falsche IP-Adresse unterschieben, z.B. für fail2ban).
 - **Metriken:** `/metrics` von Miniflux ist standardmäßig aus (`METRICS_COLLECTOR=0`). Wer es für Prometheus einschaltet, setzt zusätzlich `METRICS_USERNAME` und `METRICS_PASSWORD` – über den Proxy kommen alle Anfragen aus einem 172er-Netz, `METRICS_ALLOWED_NETWORKS` allein schützt dann nicht.
 - **Zwei Faktoren:** z.B. Authelia oder Authentik am Reverse Proxy; die Top Stories übernehmen den dort angemeldeten Benutzer mit `WEB_AUTH_MODE=proxy`.
 

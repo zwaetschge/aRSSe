@@ -4,6 +4,7 @@
 .env.*.local
 *.key
 *.pem
+secrets/
 
 # Data directories
 data/
