@@ -39,8 +39,8 @@ from sklearn.cluster import AgglomerativeClustering
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_distances, cosine_similarity
 
-from config import (DEFAULT_CONFIG_PATH, MAX_SECTION_CHARS, USER_CONFIG_PATH, Config,
-                    ensure_user_config, load_config)
+from config import (DEFAULT_CONFIG_PATH, LEGACY_CONFIG_PATH, MAX_SECTION_CHARS,
+                    USER_CONFIG_PATH, Config, ensure_user_config, load_config)
 from store import (MAX_TITLE_CHARS, ClusterResult, FetchResult, StoreTooNewError,
                    StoryStore, parse_date)
 
@@ -833,16 +833,19 @@ def record_error(store: StoryStore, config: Config, error: BaseException) -> Non
     Store why the last clustering run failed (meta 'last_error').
 
     'at' is when this error first occurred: it stays while the same error
-    repeats, so the front page can say 'Fehler seit 10:30'. Never raises.
+    repeats, so the front page can say 'Fehler seit 10:30'. 'last' is the
+    latest failure, so /healthz can tell failures since the start from
+    one stored before a restart. Never raises.
     """
     kind, message = describe_error(error, config)
     try:
+        now = datetime.now(timezone.utc).isoformat()
         previous = store.get_meta('last_error')
         if isinstance(previous, dict) and previous.get('message') == message:
-            at = previous.get('at')
+            at = previous.get('at') or now
         else:
-            at = datetime.now(timezone.utc).isoformat()
-        store.set_meta('last_error', {'at': at, 'kind': kind, 'message': message})
+            at = now
+        store.set_meta('last_error', {'at': at, 'last': now, 'kind': kind, 'message': message})
     except Exception as e:  # e.g. the database itself is the problem
         logger.error("Failed to store the error of the clustering run: %s", e)
 
@@ -1015,11 +1018,13 @@ def run_scheduler(config: Config, store: StoryStore, stop: threading.Event,
 
 def main():
     """Main entry point: clustering scheduler plus Top Stories web server."""
+    started = datetime.now(timezone.utc)
     logging.basicConfig(level=logging.INFO)
     user_config = os.getenv('ARSSE_USER_CONFIG', USER_CONFIG_PATH)
     ensure_user_config(user_config)
     try:
-        config = load_config(os.getenv('ARSSE_CONFIG', DEFAULT_CONFIG_PATH), user_config)
+        config = load_config(os.getenv('ARSSE_CONFIG', DEFAULT_CONFIG_PATH), user_config,
+                             os.getenv('ARSSE_LEGACY_CONFIG', LEGACY_CONFIG_PATH))
     except Exception as e:
         logger.error("Failed to load configuration: %s", e)
         sys.exit(1)
@@ -1067,8 +1072,8 @@ def main():
 
     logger.info("Top Stories available on port %d", config.web.port)
     try:
-        serve(create_app(config, store, web_client), host=config.web.host, port=config.web.port,
-              threads=4, ident='aRSSe')
+        serve(create_app(config, store, web_client, started), host=config.web.host,
+              port=config.web.port, threads=4, ident='aRSSe')
     finally:
         stop.set()
 

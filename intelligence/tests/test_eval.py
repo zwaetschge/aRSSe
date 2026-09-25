@@ -172,3 +172,24 @@ def test_evaluate_refuses_a_gold_file_for_another_corpus(tmp_path):
         cwd=HERE.parent, capture_output=True, text=True, timeout=120)
     assert result.returncode != 0
     assert 'No article of the corpus is labelled' in result.stderr
+
+
+def test_export_corpus_reads_the_user_config(tmp_path, monkeypatch):
+    # Same window as the service, which reads DATA_PATH/intelligence/config.yaml
+    from eval import export_corpus
+    user = tmp_path / 'user.yaml'
+    user.write_text('scheduling:\n  lookback_hours: 36\n', encoding='utf-8')
+    seen = {}
+
+    def fake_export(clusterer):
+        seen['hours'] = clusterer.config.scheduling.lookback_hours
+        return []
+
+    monkeypatch.setattr(export_corpus, 'export', fake_export)
+    monkeypatch.delenv('LOOKBACK_HOURS', raising=False)
+    monkeypatch.setenv('MINIFLUX_API_KEY', 'test-key')
+    monkeypatch.setattr(sys, 'argv', ['export_corpus.py', '--out', str(tmp_path / 'c.json'),
+                                      '--config', str(HERE.parent / 'config.yaml'),
+                                      '--user-config', str(user)])
+    export_corpus.main()
+    assert seen['hours'] == 36

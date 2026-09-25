@@ -168,6 +168,22 @@ def safe_next(value: Optional[str]) -> str:
     return value
 
 
+def _failed_since(last_error, started: datetime) -> bool:
+    """
+    True if the stored last_error failed at or after started.
+
+    Errors stored before a restart (kept in the database) do not count.
+    Entries without 'last' (older versions) use 'at'; an unreadable time
+    counts as a failure since the start.
+    """
+    if not last_error:
+        return False
+    if not isinstance(last_error, dict):
+        return True
+    failed = parse_date(last_error.get('last') or last_error.get('at'))
+    return failed is None or failed >= started
+
+
 def _text_response(text: str, status: int) -> Response:
     return Response(text + '\n', status, {'Content-Type': 'text/plain; charset=utf-8'})
 
@@ -278,12 +294,16 @@ class DedentLoader(BaseLoader):
         return self.loader.list_templates()
 
 
-def create_app(config: Config, store: StoryStore, client=None) -> Flask:
+def create_app(config: Config, store: StoryStore, client=None,
+               started: Optional[datetime] = None) -> Flask:
     """
     Create the Flask application.
 
     client is a Miniflux client for 'Story gelesen'; without one (no API
-    key) the button is not shown.
+    key) the button is not shown. started is when the service started
+    (default: now); /healthz only counts failures from then on. The
+    service passes the time before its scheduler starts, so a first run
+    that fails before the web server is up still counts.
     """
     app = Flask(__name__, static_folder=STATIC_DIR)
     # Template indentation is not sent: every KB counts on E-Ink readers
@@ -305,7 +325,7 @@ def create_app(config: Config, store: StoryStore, client=None) -> Flask:
     base_path = urlsplit(public_url).path.rstrip('/') if loopback else ''
 
     client_lock = threading.Lock()
-    started = datetime.now(timezone.utc)
+    started = started or datetime.now(timezone.utc)
     auth = config.web.auth
     trusted_networks = [ipaddress.ip_network(n, strict=False) for n in auth.trusted_proxies]
     allowed_hosts = ({h.lower() for h in config.web.allowed_hosts} | set(LOOPBACK_HOSTS)
@@ -632,9 +652,10 @@ def create_app(config: Config, store: StoryStore, client=None) -> Flask:
         Healthy while clustering runs succeed within 3 intervals.
 
         'ok' (200): a run succeeded within 3 intervals. 'starting' (200):
-        no run succeeded since the start, none failed, and the service runs
-        for less than 3 intervals. 'stale' (503): anything else; last_error
-        says why the last run failed.
+        no run succeeded since the start, none failed since the start, and
+        the service runs for less than 3 intervals. 'stale' (503): anything
+        else; last_error says why the last run failed (it may be from before
+        the start until the next run).
         """
         now = datetime.now(timezone.utc)
         last_success = parse_date(store.get_meta('last_success'))
@@ -642,7 +663,8 @@ def create_app(config: Config, store: StoryStore, client=None) -> Flask:
         limit = timedelta(minutes=config.scheduling.interval_minutes * 3)
         if last_success is not None and now - last_success < limit:
             status = 'ok'
-        elif (not last_error and (last_success is None or last_success < started)
+        elif (not _failed_since(last_error, started)
+              and (last_success is None or last_success < started)
               and now - started < limit):
             status = 'starting'
         else:

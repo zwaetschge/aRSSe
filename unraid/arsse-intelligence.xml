@@ -14,10 +14,15 @@
     zusammen (wie Google News), markiert Duplikate als gelesen und zeigt eine
     schlanke Startseite für E-Ink-Reader auf Port 8081.
 
-    Voraussetzungen: das Netzwerk arsse (docker network create arsse) und
-    Miniflux aus dem Template arsse-miniflux im selben Netzwerk. In Miniflux
-    einen Benutzer ohne Admin-Rechte anlegen und dort unter Einstellungen >
-    API-Schlüssel einen Key erzeugen (README, "Absicherung").
+    Voraussetzungen: das Netzwerk arsse (docker network create arsse; unter
+    Settings > Docker "Preserve user defined networks" auf Yes, sonst ist es
+    nach einem Neustart weg) und Miniflux aus dem Template arsse-miniflux im
+    selben Netzwerk. In Miniflux einen Benutzer ohne Admin-Rechte anlegen und
+    dort unter Einstellungen > API-Schlüssel einen Key erzeugen (README,
+    "Absicherung").
+
+    Das Image :latest gibt es ab der ersten Release-Version; bis dahin unter
+    Repository :edge statt :latest eintragen.
 
     Eigene Einstellungen (min_sources, Rubriken, ...) stehen in
     /mnt/user/appdata/arsse/intelligence/config.yaml; die Datei wird beim
@@ -28,11 +33,11 @@
   <WebUI>http://[IP]:[PORT:8081]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/zwaetschge/aRSSe/HEAD/unraid/arsse-intelligence.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/zwaetschge/aRSSe/HEAD/intelligence/static/icon-512.png</Icon>
-  <ExtraParams>--read-only --tmpfs /tmp --cap-drop=ALL --cap-add=CHOWN --cap-add=DAC_OVERRIDE --cap-add=SETUID --cap-add=SETGID --security-opt=no-new-privileges:true --memory=768m --cpus=1 --pids-limit=128</ExtraParams>
+  <ExtraParams>--read-only --tmpfs /tmp --cap-drop=ALL --cap-add=CHOWN --cap-add=DAC_OVERRIDE --cap-add=SETUID --cap-add=SETGID --security-opt=no-new-privileges:true --memory=1g --cpus=1 --pids-limit=128</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <DateInstalled></DateInstalled>
-  <Requires>Netzwerk "arsse" (docker network create arsse) und Miniflux aus dem Template arsse-miniflux in diesem Netzwerk</Requires>
+  <Requires>Netzwerk "arsse" (docker network create arsse; Settings &gt; Docker: "Preserve user defined networks" auf Yes) und Miniflux aus dem Template arsse-miniflux in diesem Netzwerk</Requires>
 
   <!-- Port and data -->
   <Config

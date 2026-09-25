@@ -177,8 +177,8 @@ OWNER=$(stat -c %u:%g "$WORK/data/intelligence/config.yaml")
 step "Checking the hardened intelligence container"
 CONTAINER=$(compose ps -q intelligence)
 docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.Memory}}' \
-    "$CONTAINER" | tee /dev/stderr | grep -qiE '^true \[(cap_)?all\] 805306368$' \
-    || { echo "intelligence is not read-only, without capabilities and limited to 768 MB"; exit 1; }
+    "$CONTAINER" | tee /dev/stderr | grep -qiE '^true \[(cap_)?all\] 1073741824$' \
+    || { echo "intelligence is not read-only, without capabilities and limited to 1 GB"; exit 1; }
 if compose exec -T intelligence sh -c 'echo x > /app/web.py' 2>/dev/null; then
     echo "The code in /app is writable"; exit 1
 fi
@@ -260,6 +260,7 @@ conn = sqlite3.connect(sys.argv[1])
 assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 assert conn.execute('SELECT COUNT(*) FROM stories').fetchone()[0] > 0
 PY
+grep -q "^# " "$BACKUP/config.yaml" || { echo "config.yaml (own settings) not backed up"; exit 1; }
 [ "$(stat -c %a "$BACKUP/env")" = 600 ] || { echo "env backup is not mode 600"; exit 1; }
 cmp -s "$WORK/.env" "$BACKUP/env" || { echo "env backup differs from .env"; exit 1; }
 echo "    $(find "$BACKUP" -mindepth 1 -printf '%f ')"

@@ -16,6 +16,9 @@
 
     Vor der Installation einmalig im Unraid-Terminal:
       docker network create arsse
+    und unter Settings > Docker (erweiterte Ansicht) "Preserve user defined
+    networks" auf Yes stellen: Sonst löscht Unraid das Netzwerk beim nächsten
+    Neustart von Docker, und die Container starten nicht mehr.
     Alle drei Container (arsse-db, arsse-miniflux, arsse-intelligence) kommen
     in dieses Netzwerk und erreichen sich dort über ihre Namen. Im Standard-
     Netzwerk "bridge" gibt es keine Namensauflösung zwischen Containern.
@@ -36,7 +39,7 @@
   <DateInstalled></DateInstalled>
   <DonateText>Support Miniflux Development</DonateText>
   <DonateLink>https://github.com/sponsors/fguillot</DonateLink>
-  <Requires>Netzwerk "arsse" (docker network create arsse) und ein PostgreSQL-Container namens arsse-db in diesem Netzwerk (README, "Unraid ohne Compose")</Requires>
+  <Requires>Netzwerk "arsse" (docker network create arsse; Settings &gt; Docker: "Preserve user defined networks" auf Yes) und ein PostgreSQL-Container namens arsse-db in diesem Netzwerk (README, "Unraid ohne Compose")</Requires>
 
   <!-- Port Configuration -->
   <Config

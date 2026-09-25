@@ -69,14 +69,18 @@ case "$1" in
         [ "$1" = -T ] && shift
         [ "$1" = -u ] && shift 2
         service="$1"; shift
+        # Wie docker compose exec: stdin geht an jeden Befehl, auch mit -T.
+        # Nur 'python -' liest daraus sein Skript
+        [ "$service $*" = "intelligence python -" ] || cat > /dev/null
         case "$service $*" in
             "db pg_dump -U leser_db -Fc miniflux") printf 'PGDMP-testdaten' ;;
             "db "*) exit 1 ;;
             "intelligence stat -c %u:%g /app/data") echo "$(id -u):$(id -g)" ;;
-            "intelligence python -")
+            "intelligence python -"|"intelligence python -c "*)
                 cd "$INTELLIGENCE_DIR" && exec env ARSSE_CONFIG=/nonexistent \
                     ARSSE_USER_CONFIG="$STUB_CONFIG" MINIFLUX_URL="$STUB_MINIFLUX" \
-                    MINIFLUX_API_KEY="$STUB_KEY" "$PYTHON" - ;;
+                    ARSSE_LEGACY_CONFIG=/nonexistent STUB_DB="$STUB_DATA/arsse.db" \
+                    MINIFLUX_API_KEY="$STUB_KEY" "$PYTHON" "${@:2}" ;;
             "intelligence test -f /app/data/config.yaml") test -f "$STUB_DATA/config.yaml" ;;
             "intelligence cat /app/data/config.yaml") cat "$STUB_DATA/config.yaml" ;;
             *) echo "unerwartet: $service $*" >&2; exit 1 ;;
@@ -92,7 +96,7 @@ STUB_PATH="$WORK/stubs:$PATH"
 
 run_backup() {
     set +e
-    OUT=$(cd "$WORK" && PATH="$STUB_PATH" bash "$PROJ/scripts/backup.sh" "$@" 2>&1)
+    OUT=$(cd "$WORK" && PATH="$STUB_PATH" bash "$PROJ/scripts/backup.sh" "$@" 2>&1 < /dev/null)
     STATUS=$?
     set -e
 }
@@ -135,6 +139,53 @@ B=$(find "$WORK/ziel" -mindepth 1 -maxdepth 1 -type d -name '20*' | head -n 1)
 [ -s "$B/arsse.db" ] || fail "arsse.db fehlt im Zielverzeichnis"
 [ ! -e "$B/feeds.opml" ] || fail "leere feeds.opml angelegt"
 grep -q "OPML-Export fehlgeschlagen" <<< "$OUT" || fail "Warnung zum OPML-Export fehlt"
+
+step "Story-Datenbank nicht lesbar: Rest der Sicherung bleibt"
+rm -rf "$WORK/ziel"
+cat > "$WORK/broken.yaml" <<YAML
+storage:
+  db_path: "$WORK/fehlt/arsse.db"
+YAML
+STUB_CONFIG="$WORK/broken.yaml" run_backup "$WORK/ziel"
+[ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS: $OUT"
+B=$(find "$WORK/ziel" -mindepth 1 -maxdepth 1 -type d -name '20*' | head -n 1)
+[ -s "$B/miniflux.dump" ] || fail "miniflux.dump fehlt"
+[ -f "$B/env" ] || fail "env fehlt"
+grep -q '<opml' "$B/feeds.opml" 2>/dev/null || fail "feeds.opml fehlt"
+[ ! -e "$B/arsse.db" ] || fail "unbrauchbare arsse.db angelegt"
+grep -q "Story-Datenbank nicht gesichert" <<< "$OUT" || fail "Warnung zur Story-Datenbank fehlt"
+
+step "Leerer OPML-Export gilt nicht als gesichert"
+rm -rf "$WORK/ziel"
+cp "$WORK/miniflux/v1/export" "$WORK/export.opml"
+: > "$WORK/miniflux/v1/export"
+run_backup "$WORK/ziel"
+cp "$WORK/export.opml" "$WORK/miniflux/v1/export"
+[ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS: $OUT"
+B=$(find "$WORK/ziel" -mindepth 1 -maxdepth 1 -type d -name '20*' | head -n 1)
+[ ! -e "$B/feeds.opml" ] || fail "leere feeds.opml angelegt"
+grep -q "OPML-Export fehlgeschlagen" <<< "$OUT" || fail "Warnung zum leeren OPML-Export fehlt"
+
+step "Älteres Image (load_config kennt nur die Referenzdatei)"
+# Direkt nach 'git pull' läuft noch der Container der Vorversion
+rm -rf "$WORK/ziel"
+mkdir -p "$WORK/altes-image"
+cat > "$WORK/altes-image/config.py" <<'PY'
+import os
+from types import SimpleNamespace
+
+
+def load_config(config_path=None):
+    return SimpleNamespace(miniflux_url=os.environ['MINIFLUX_URL'],
+                           miniflux_api_key=os.environ['MINIFLUX_API_KEY'],
+                           storage=SimpleNamespace(db_path=os.environ['STUB_DB']))
+PY
+INTELLIGENCE_DIR="$WORK/altes-image" run_backup "$WORK/ziel"
+[ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS: $OUT"
+B=$(find "$WORK/ziel" -mindepth 1 -maxdepth 1 -type d -name '20*' | head -n 1)
+[ -s "$B/miniflux.dump" ] || fail "miniflux.dump fehlt"
+grep -q '<opml' "$B/feeds.opml" 2>/dev/null || fail "feeds.opml fehlt"
+[ -s "$B/arsse.db" ] || fail "arsse.db fehlt"
 
 step "Intelligence Layer läuft nicht"
 rm -rf "$WORK/ziel"

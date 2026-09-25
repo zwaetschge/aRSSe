@@ -28,7 +28,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
-from config import USER_CONFIG_PATH, load_config
+from config import LEGACY_CONFIG_PATH, USER_CONFIG_PATH, load_config
 from news_clustering import NewsClusterer, setup_logging
 
 DEFAULT_THRESHOLDS = [0.65, 0.7, 0.75, 0.8]
@@ -197,7 +197,9 @@ def main():
     config_path = args.config
     if not os.path.exists(config_path):
         config_path = str(Path(__file__).resolve().parent / 'config.yaml')
-    config = load_config(config_path, args.user_config)
+    # Like the service: old edits of the checkout's config.yaml still apply
+    config = load_config(config_path, args.user_config,
+                         os.getenv('ARSSE_LEGACY_CONFIG', LEGACY_CONFIG_PATH))
     if args.ngram_max is not None:
         config.clustering.ngram_max = args.ngram_max
     if args.min_pair_similarity is not None:

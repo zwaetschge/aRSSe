@@ -9,6 +9,11 @@ Usage (from the intelligence directory, MINIFLUX_URL/MINIFLUX_API_KEY set):
     python eval/export_corpus.py --out eval/corpus.json
 Inside the container, write to the data volume:
     docker compose exec intelligence python eval/export_corpus.py --out /app/data/corpus.json
+
+The window (scheduling.lookback_hours, max_entries, ...) comes from the same
+settings as the service: --config, then --user-config (in the container
+/app/data/config.yaml = DATA_PATH/intelligence/config.yaml), then the
+environment.
 """
 
 import argparse
@@ -21,7 +26,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
-from config import load_config  # noqa: E402
+from config import LEGACY_CONFIG_PATH, USER_CONFIG_PATH, load_config  # noqa: E402
 from news_clustering import NewsClusterer  # noqa: E402
 
 # What clustering, the story database and the gold labels (URL) need
@@ -53,11 +58,16 @@ def main():
     parser.add_argument('--out', default=str(HERE / 'corpus.json'),
                         help='output file (default: eval/corpus.json)')
     parser.add_argument('--config', default=os.getenv('ARSSE_CONFIG', '/app/config.yaml'))
+    parser.add_argument('--user-config',
+                        default=os.getenv('ARSSE_USER_CONFIG', USER_CONFIG_PATH),
+                        help='own settings on top of --config, as in the service (default: '
+                             f'$ARSSE_USER_CONFIG or {USER_CONFIG_PATH}; skipped if missing)')
     parser.add_argument('--hours', type=int, help='override scheduling.lookback_hours')
     args = parser.parse_args()
 
     config_path = args.config if os.path.exists(args.config) else str(HERE.parent / 'config.yaml')
-    config = load_config(config_path)
+    config = load_config(config_path, args.user_config,
+                         os.getenv('ARSSE_LEGACY_CONFIG', LEGACY_CONFIG_PATH))
     if args.hours:
         config.scheduling.lookback_hours = args.hours
     entries = export(NewsClusterer(config, _NoStore()))

@@ -457,19 +457,33 @@ ohne Linux-Berechtigungen außer `CHOWN` und `DAC_OVERRIDE` (Datenverzeichnis ü
 sowie `SETUID`/`SETGID` (Benutzer wechseln). Nach dem Wechsel zu `PUID:PGID` hat der
 Dienst keine Berechtigung mehr. Der Code gehört root, nur `/app/data` gehört `PUID`;
 den Bytecode übersetzt schon der Image-Bau (`PYTHONDONTWRITEBYTECODE=1` zur Laufzeit).
-Grenzen: 768 MB Speicher, 1 CPU, 128 Prozesse; `OPENBLAS_NUM_THREADS=1` hält den
-BLAS-Threadpool klein (gemessen ohne Laufzeitnachteil).
+Grenzen: 1 GB Speicher, 1 CPU, 128 Prozesse; `OPENBLAS_NUM_THREADS=1` hält den
+BLAS-Threadpool klein (gemessen ohne Laufzeitnachteil). Die Speichergrenze deckt den
+Höchstwert `max_entries` = 5000 (gemessen ~790 MB Spitze: ~176 MB nach den Imports plus
+gut drei dichte n×n-Matrizen); `test_memory_limit_fits_the_largest_allowed_run` prüft
+Compose-Datei und Unraid-Template gegen `MAX_ENTRIES_LIMIT`.
 
 #### Konfiguration in Schichten
 `load_config` liest nacheinander die Standardwerte der Dataclasses, `/app/config.yaml`
-(im Image, dokumentierte Referenz), `/app/data/config.yaml` (eigene Einstellungen im
-Datenvolume, legt der erste Start aus `config.stub.yaml` an) und die
-Umgebungsvariablen. Jede Datei setzt nur die Einstellungen, die sie nennt
+(im Image, dokumentierte Referenz), `/app/legacy/config.yaml` (nur für den Umstieg, s.u.),
+`/app/data/config.yaml` (eigene Einstellungen im Datenvolume, legt der erste Start aus
+`config.stub.yaml` an) und die Umgebungsvariablen. Jede Datei setzt nur die Einstellungen, die sie nennt
 (`_apply_section` je Abschnitt); Listen und Tabellen ersetzen den Wert ganz. Die
 Referenz entspricht genau den Standardwerten (Test `test_shipped_config_equals_the_defaults`);
 weicht `/app/config.yaml` davon ab, wurde sie vor dem Image-Bau geändert oder von einer
 älteren Compose-Datei eingebunden – der Dienst nennt dann die betroffenen Einstellungen
 im Log und verweist auf die eigene Datei.
+
+Ältere Versionen banden `./intelligence/config.yaml` als `/app/config.yaml` ein, und das
+README empfahl, sie zu ändern. Damit solche Änderungen mit dem veröffentlichten Image
+nicht stillschweigend verschwinden, bindet `docker-compose.yml` `./intelligence` nur
+lesend als `/app/legacy` ein. Weicht `/app/legacy/config.yaml` von der Referenz ab, gilt
+sie als Schicht zwischen Referenz und eigener Datei (`_apply_legacy_config`): Was die
+eigene Datei setzt, gewinnt; die übrigen abweichenden Einstellungen gelten weiter und
+stehen bei jedem Start in einer Warnung mit den Schritten zum Umzug. Fehlt die Datei,
+ist sie unverändert oder nicht lesbar (Rechte, kaputtes YAML), wird sie übersprungen –
+der Dienst startet immer. `scripts/backup.sh`, `evaluate.py` und
+`eval/export_corpus.py` laden die Einstellungen genauso.
 
 #### Fehler und Health Check
 Scheitert ein Lauf (oder schon das Anlegen des Miniflux-Clients), speichert
@@ -479,13 +493,17 @@ erreichbar): `AccessUnauthorized` → „Miniflux lehnt den API-Key ab“ (`auth
 → „MINIFLUX_API_KEY fehlt“ (`config`), andere Miniflux- und Netzwerkfehler → „Miniflux
 unter <URL> nicht erreichbar“ (`connection`), `sqlite3.OperationalError` → „Datenbank
 nicht beschreibbar“ (`database`), alles andere nur mit dem Namen der Ausnahme (`internal`).
-`at` bleibt, solange derselbe Fehler wiederkehrt („Fehler seit 10:30“); ein erfolgreicher
-Lauf löscht den Eintrag. Wiederholt wird nach 10 s, danach mit doppeltem Abstand bis
+`at` bleibt, solange derselbe Fehler wiederkehrt („Fehler seit 10:30“), `last` ist der
+jüngste Fehlschlag; ein erfolgreicher Lauf löscht den Eintrag. Wiederholt wird nach 10 s, danach mit doppeltem Abstand bis
 höchstens `min(Intervall, 5 min)`.
 
 `/healthz` antwortet `ok` (200), solange der letzte Erfolg weniger als drei Intervalle
 zurückliegt; `starting` (200), solange seit dem Start noch kein Lauf gelungen ist, keiner
 gescheitert ist und der Dienst weniger als drei Intervalle läuft; sonst `stale` (503).
+„Seit dem Start“ heißt: `last` (ältere Einträge: `at`) liegt nicht vor dem Zeitpunkt, den
+`main()` noch vor dem Scheduler nimmt. Ein Fehler von vor einem Neustart (z.B. der falsche
+Key, den der Benutzer gerade korrigiert hat) steht weiter in `last_error`, bis der nächste
+Lauf ihn löscht oder ersetzt, beendet `starting` aber nicht.
 Der Docker-Health-Check des Images fragt `/healthz` ab.
 
 #### Build und Release
@@ -735,7 +753,7 @@ LIMIT 10;
 |------------|-----|-----|---------|
 | Miniflux | 1 Core | 256 MB | - |
 | PostgreSQL | 1 Core | 512 MB | SSD empfohlen |
-| Intelligence | 1 Core (Grenze) | ~270 MB, Grenze 768 MB | wenige MB (SQLite) |
+| Intelligence | 1 Core (Grenze) | ~270 MB, Grenze 1 GB | wenige MB (SQLite) |
 | **Gesamt** | **2 Cores** | **~1 GB** | **10+ GB** |
 
 Gemessen am Intelligence Layer: 722 echte Artikel brauchen 0,74 s und 177 MB, 2000

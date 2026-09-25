@@ -12,6 +12,8 @@
 #                  Online-Sicherung)
 #   config.yaml    eigene Einstellungen des Intelligence Layers (falls vorhanden)
 #   env            Kopie der .env mit allen Passwörtern (Rechte 600)
+# miniflux.dump und env sind Pflicht; scheitert einer der anderen Teile, gibt
+# es eine Warnung, und die Sicherung bleibt ohne ihn erhalten.
 # Sicherungen, die älter als BACKUP_KEEP_DAYS Tage sind (Standard 14), werden
 # danach gelöscht. Wiederherstellen: README, Abschnitt "Backup und Updates".
 #
@@ -62,13 +64,60 @@ cleanup() {
     [ -z "$WORK_DIR" ] || rm -rf "$WORK_DIR"
 }
 
-# Python im Intelligence-Container als Besitzer des Datenverzeichnisses
-# (PUID:PGID): Als root angelegte Dateien (-wal, -shm) könnte der Dienst
-# danach nicht mehr öffnen
+# Befehl in einem Container. stdin ist immer /dev/null: docker compose exec
+# reicht stdin auch mit -T an den Befehl weiter, und der würde sonst
+# verschlucken, was für einen späteren Befehl bestimmt ist
+compose_exec() {
+    compose exec -T "$@" < /dev/null
+}
+
+# Einstellungen des Dienstes laden, ohne sich auf Interna einer bestimmten
+# Version zu verlassen: Direkt nach 'git pull' läuft oft noch das alte Image,
+# dessen load_config() nur die Referenzdatei kennt
+LOAD_CONFIG_PY=$(cat <<'PY'
+import inspect, logging, os, sys
+logging.disable(logging.CRITICAL)
+import config as arsse_config
+paths = [os.getenv('ARSSE_CONFIG', '/app/config.yaml'),
+         os.getenv('ARSSE_USER_CONFIG', '/app/data/config.yaml'),
+         os.getenv('ARSSE_LEGACY_CONFIG', '/app/legacy/config.yaml')]
+accepted = len(inspect.signature(arsse_config.load_config).parameters)
+config = arsse_config.load_config(*paths[:accepted])
+PY
+)
+
+# OPML über das Docker-Netzwerk, mit dem API-Key des Dienstes (auch
+# MINIFLUX_API_KEY_FILE); ohne Key schlägt der Export fehl
+OPML_PY=$(cat <<'PY'
+import urllib.request
+if not config.miniflux_api_key:
+    sys.exit("MINIFLUX_API_KEY fehlt")
+request = urllib.request.Request(config.miniflux_url.rstrip('/') + '/v1/export',
+                                 headers={'X-Auth-Token': config.miniflux_api_key})
+with urllib.request.urlopen(request, timeout=60) as response:
+    sys.stdout.buffer.write(response.read())
+PY
+)
+
+# SQLite-Online-Backup: konsistent, auch während ein Lauf schreibt
+SQLITE_PY=$(cat <<'PY'
+import sqlite3
+source = sqlite3.connect(config.storage.db_path, timeout=30)
+copy = sqlite3.connect(':memory:')
+source.backup(copy)
+sys.stdout.buffer.write(copy.serialize())
+PY
+)
+
+# Python-Code (als Argument) im Intelligence-Container als Besitzer des
+# Datenverzeichnisses (PUID:PGID): Als root angelegte Dateien (-wal, -shm)
+# könnte der Dienst danach nicht mehr öffnen
 intelligence_python() {
     local owner
-    owner=$(compose exec -T intelligence stat -c '%u:%g' /app/data | tr -d '\r')
-    compose exec -T -u "$owner" intelligence python -
+    owner=$(compose_exec intelligence stat -c '%u:%g' /app/data | tr -d '\r')
+    [ -n "$owner" ] || return 1
+    compose_exec -u "$owner" intelligence python -c "$LOAD_CONFIG_PY
+$1"
 }
 
 main() {
@@ -101,51 +150,37 @@ main() {
     WORK_DIR=$(mktemp -d "$backup_dir/.unfertig-XXXXXX")
     trap cleanup EXIT
 
-    compose exec -T db pg_dump -U "$postgres_user" -Fc miniflux > "$WORK_DIR/miniflux.dump"
+    compose_exec db pg_dump -U "$postgres_user" -Fc miniflux > "$WORK_DIR/miniflux.dump"
     [ -s "$WORK_DIR/miniflux.dump" ] || fail "pg_dump hat nichts geliefert"
     info "Miniflux-Datenbank gesichert ($(du -h "$WORK_DIR/miniflux.dump" | cut -f1))"
 
+    # Die folgenden Teile sind verzichtbar: Schlägt einer fehl, bleibt die
+    # Sicherung mit miniflux.dump und env trotzdem erhalten
     if running intelligence; then
-        # OPML über das Docker-Netzwerk, mit dem API-Key des Dienstes
-        # (auch MINIFLUX_API_KEY_FILE); ohne Key wird sie übersprungen
-        if intelligence_python > "$WORK_DIR/feeds.opml" <<'PY'
-import logging, os, sys, urllib.request
-logging.disable(logging.CRITICAL)
-from config import DEFAULT_CONFIG_PATH, USER_CONFIG_PATH, load_config
-config = load_config(os.getenv('ARSSE_CONFIG', DEFAULT_CONFIG_PATH),
-                     os.getenv('ARSSE_USER_CONFIG', USER_CONFIG_PATH))
-if not config.miniflux_api_key:
-    sys.exit("MINIFLUX_API_KEY fehlt")
-request = urllib.request.Request(config.miniflux_url.rstrip('/') + '/v1/export',
-                                 headers={'X-Auth-Token': config.miniflux_api_key})
-with urllib.request.urlopen(request, timeout=60) as response:
-    sys.stdout.buffer.write(response.read())
-PY
-        then
+        if intelligence_python "$OPML_PY" > "$WORK_DIR/feeds.opml" \
+                && [ -s "$WORK_DIR/feeds.opml" ]; then
             info "Abonnements als OPML gesichert"
         else
             rm -f "$WORK_DIR/feeds.opml"
             warn "OPML-Export fehlgeschlagen (die Abonnements stecken auch in miniflux.dump)"
         fi
 
-        # SQLite-Online-Backup: konsistent, auch während ein Lauf schreibt
-        intelligence_python > "$WORK_DIR/arsse.db" <<'PY'
-import logging, os, sqlite3, sys
-logging.disable(logging.CRITICAL)
-from config import DEFAULT_CONFIG_PATH, USER_CONFIG_PATH, load_config
-path = load_config(os.getenv('ARSSE_CONFIG', DEFAULT_CONFIG_PATH),
-                   os.getenv('ARSSE_USER_CONFIG', USER_CONFIG_PATH)).storage.db_path
-source = sqlite3.connect(path, timeout=30)
-copy = sqlite3.connect(':memory:')
-source.backup(copy)
-sys.stdout.buffer.write(copy.serialize())
-PY
-        [ -s "$WORK_DIR/arsse.db" ] || fail "Story-Datenbank: Sicherung ist leer"
-        info "Story-Datenbank gesichert ($(du -h "$WORK_DIR/arsse.db" | cut -f1))"
+        if intelligence_python "$SQLITE_PY" > "$WORK_DIR/arsse.db" \
+                && [ -s "$WORK_DIR/arsse.db" ]; then
+            info "Story-Datenbank gesichert ($(du -h "$WORK_DIR/arsse.db" | cut -f1))"
+        else
+            rm -f "$WORK_DIR/arsse.db"
+            warn "Story-Datenbank nicht gesichert (verzichtbar: ohne sie baut der" \
+                "nächste Lauf die Stories neu auf)"
+        fi
 
-        if compose exec -T intelligence test -f /app/data/config.yaml; then
-            compose exec -T intelligence cat /app/data/config.yaml > "$WORK_DIR/config.yaml"
-            info "Eigene Einstellungen (config.yaml) gesichert"
+        if compose_exec intelligence test -f /app/data/config.yaml; then
+            if compose_exec intelligence cat /app/data/config.yaml > "$WORK_DIR/config.yaml"; then
+                info "Eigene Einstellungen (config.yaml) gesichert"
+            else
+                rm -f "$WORK_DIR/config.yaml"
+                warn "Eigene Einstellungen (config.yaml) nicht gesichert"
+            fi
         fi
     else
         warn "Intelligence Layer läuft nicht: Story-Datenbank und OPML übersprungen"

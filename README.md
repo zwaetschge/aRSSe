@@ -18,7 +18,7 @@ Das System besteht aus fünf logischen Schichten:
 
 - Unraid 6.x oder höher (oder ein anderer Linux-Server, amd64 oder arm64)
 - Docker und Docker Compose – auf Unraid über das Plugin *Compose Manager*, oder ohne Compose über die Templates (siehe [Unraid ohne Compose](#unraid-ohne-compose))
-- Etwa 1 GB freier RAM für den ganzen Stack: Der Intelligence Layer braucht bei 2000 Artikeln pro Lauf gemessen rund 270 MB und ist auf 768 MB begrenzt
+- Etwa 1 GB freier RAM für den ganzen Stack: Der Intelligence Layer braucht bei 2000 Artikeln pro Lauf gemessen rund 270 MB (beim Höchstwert `max_entries: 5000` rund 790 MB) und ist auf 1 GB begrenzt
 - SSD-Cache empfohlen für PostgreSQL
 
 ## Schnellstart
@@ -104,7 +104,7 @@ Die Miniflux-API kann keine Tags oder eigenen Metadaten schreiben – deshalb br
 | `/story/<id>/gelesen` | Knopf „Story gelesen (N)“ (Formular, `POST`): markiert die ungelesenen Artikel der Story im Zeitfenster in Miniflux als gelesen |
 | `/suche?q=…` | Suche in Titeln und Anrissen aller gespeicherten Stories (auch älterer, `storage.retention_days`), 2 bis 100 Zeichen; darunter ein Link zur Volltextsuche von Miniflux |
 | `/api/stories` | Dieselben Daten als JSON (alle Stories einzeln, ohne Seiten und Themen; `?rubrik=` und `?alle=1` wie oben) |
-| `/healthz` | Zustand als JSON (immer ohne Anmeldung): `ok` (`200`), solange der letzte erfolgreiche Lauf weniger als drei Intervalle zurückliegt; `starting` (`200`) nach dem Start, bis der erste Lauf gelingt, höchstens drei Intervalle lang und nur ohne Fehler; sonst `stale` (`503`). `last_error` nennt den Grund des letzten Fehlschlags, `last_stats` die Statistik des letzten Laufs |
+| `/healthz` | Zustand als JSON (immer ohne Anmeldung): `ok` (`200`), solange der letzte erfolgreiche Lauf weniger als drei Intervalle zurückliegt; `starting` (`200`) nach dem Start, bis der erste Lauf gelingt, höchstens drei Intervalle lang und nur, solange seit dem Start kein Lauf gescheitert ist (ein gespeicherter Fehler von vor dem Neustart zählt nicht); sonst `stale` (`503`). `last_error` nennt den Grund des letzten Fehlschlags, `last_stats` die Statistik des letzten Laufs |
 | `/static/…` | Manifest und Icons für den Startbildschirm (immer ohne Anmeldung, Icons holen Browser und Android teils ohne Zugangsdaten) |
 
 Die Seiten sind für E-Ink gebaut: kurze Seiten statt langem Scrollen, nur absolute Uhrzeiten („Stand 18:32“, „Mi 14:53“ – relative Angaben wie „vor 5 Min.“ stimmen auf einem stehenden Bildschirm bald nicht mehr), jede Quelle zuerst mit einem Artikel statt mehrerer aus demselben Feed, und Links, die als ganze Zeile mindestens 44 px hoch antippbar sind. Die Uhrzeiten gelten in der Zeitzone `TZ` aus `.env` (Standard Europe/Berlin) oder `web.timezone` in `config.yaml`.
@@ -151,7 +151,7 @@ web:
 
 Umgebungsvariablen aus `.env` (z.B. `CLUSTERING_THRESHOLD`) überschreiben beide Dateien; auskommentierte bzw. leere Variablen tun das nicht. Für das Unraid-Template gibt es zusätzlich `LOOKBACK_HOURS`, `RETENTION_DAYS`, `WEB_MIN_SOURCES` und `WEB_MAX_STORIES`.
 
-**Früher geänderte `intelligence/config.yaml`:** Ältere Versionen dieses README empfahlen, die Datei im Repository zu ändern. Das blockiert `git pull`, und das veröffentlichte Image kennt die Änderungen nicht. Übernehmen Sie sie vor dem Update:
+**Früher geänderte `intelligence/config.yaml`:** Ältere Versionen dieses README empfahlen, die Datei im Repository zu ändern. Das blockiert `git pull`, und das veröffentlichte Image enthält die Änderungen nicht. Übernehmen Sie sie vor dem Update:
 
 ```bash
 cp intelligence/config.yaml ${DATA_PATH}/intelligence/config.yaml   # DATA_PATH aus .env
@@ -159,7 +159,9 @@ git checkout -- intelligence/config.yaml
 git pull
 ```
 
-Danach in der neuen Datei nur die geänderten Einstellungen stehen lassen, dann gelten künftige Verbesserungen der Standardwerte auch für Sie. `scripts/setup.sh` übernimmt eine geänderte `intelligence/config.yaml` automatisch, solange die eigene Datei fehlt oder noch die unveränderte Vorlage ist. Solange ein selbst gebautes Image eine geänderte Referenz enthält (oder eine ältere `docker-compose.yml` sie einbindet), gelten die Änderungen weiter; das Log nennt dann beim Start die betroffenen Einstellungen.
+Danach in der neuen Datei nur die geänderten Einstellungen stehen lassen, dann gelten künftige Verbesserungen der Standardwerte auch für Sie. `scripts/setup.sh` übernimmt eine geänderte `intelligence/config.yaml` automatisch, solange die eigene Datei fehlt oder noch die unveränderte Vorlage ist.
+
+Ist die Änderung trotzdem noch in `intelligence/config.yaml` (z.B. nach `git stash` und `git stash pop` oder als eigener Commit), geht sie nicht verloren: `docker-compose.yml` bindet `./intelligence` nur lesend als `/app/legacy` ein, und Einstellungen, die dort anders sind als in der Referenz und in Ihrer eigenen Datei fehlen, gelten vorerst weiter. Das Log nennt sie dann bei jedem Start (`… differs from the shipped reference: clustering.threshold …`) – ziehen Sie sie wie oben um; eine spätere Version liest die Datei nicht mehr. Dasselbe gilt für ein selbst gebautes Image mit geänderter Referenz.
 
 Anpassungen an `docker-compose.yml` selbst (Ports, Speicherlimit, zusätzliche Mounts) gehören in eine `docker-compose.override.yml` daneben: Compose liest sie automatisch, und `git pull` lässt sie in Ruhe. Beispiel:
 
@@ -167,7 +169,7 @@ Anpassungen an `docker-compose.yml` selbst (Ports, Speicherlimit, zusätzliche M
 # docker-compose.override.yml
 services:
   intelligence:
-    mem_limit: 1g
+    mem_limit: 512m   # reicht bis etwa scheduling.max_entries: 3000
 ```
 
 **Schwelle kalibrieren:** Der Standardwert 0.75 ist an ~500 echten Artikeln aus 13 deutschen Nachrichtenfeeds gemessen (Kurztexte aus RSS, kein Volltext). Mit anderen Feeds oder aktiviertem Volltext-Crawler lohnt ein Vergleich – das Werkzeug liest nur und schreibt nichts:
@@ -408,7 +410,7 @@ WEB_ALLOWED_HOSTS=stories.example.com
 
 `docker-compose.yml` beschränkt die Container auf das Nötige:
 
-- **Intelligence Layer:** schreibgeschütztes Dateisystem (beschreibbar sind nur `/app/data` und `/tmp` im Speicher), keine Linux-Berechtigungen außer denen, die der Start als root braucht, um das Datenverzeichnis an `PUID:PGID` zu übergeben (`CHOWN`, `DAC_OVERRIDE`, `SETUID`, `SETGID`); danach läuft der Dienst ohne jede Berechtigung und kann seinen eigenen Code nicht ändern. Dazu `no-new-privileges` und Grenzen für Speicher (768 MB), CPU (1 Kern) und Prozesse (128).
+- **Intelligence Layer:** schreibgeschütztes Dateisystem (beschreibbar sind nur `/app/data` und `/tmp` im Speicher), keine Linux-Berechtigungen außer denen, die der Start als root braucht, um das Datenverzeichnis an `PUID:PGID` zu übergeben (`CHOWN`, `DAC_OVERRIDE`, `SETUID`, `SETGID`); danach läuft der Dienst ohne jede Berechtigung und kann seinen eigenen Code nicht ändern. Dazu `no-new-privileges` und Grenzen für Speicher (1 GB, genug für `max_entries: 5000`), CPU (1 Kern) und Prozesse (128).
 - **Miniflux:** schreibgeschützt, ohne Berechtigungen, `no-new-privileges`.
 - **PostgreSQL:** `no-new-privileges` (der Start braucht root, um die Rechte des Datenverzeichnisses zu setzen).
 - **Logs:** Docker behält je Container höchstens 3 × 10 MB (`x-logging`); `logging.file` in `config.yaml` rotiert bei 5 MB (drei ältere Dateien).
@@ -419,7 +421,9 @@ Grenzen ändern Sie in einer `docker-compose.override.yml` (siehe [Konfiguration
 
 Ohne das Compose-Manager-Plugin laufen die drei Container auch über die Docker-Seite von Unraid. Die Templates liegen in `unraid/`; der Intelligence Layer kommt als fertiges Image aus der GitHub Container Registry.
 
-1. **Netzwerk anlegen** (einmalig, im Unraid-Terminal): `docker network create arsse`. Im Standardnetzwerk `bridge` finden sich Container nicht über ihre Namen.
+Das Template nutzt `ghcr.io/zwaetschge/arsse-intelligence:latest`, das erst mit der ersten Release-Version (Tag `vX.Y.Z`) erscheint. Gibt es noch keine, tragen Sie unter *Repository* `…:edge` ein (Stand des Hauptzweigs) oder nehmen den Weg über Compose, der das Image notfalls selbst baut.
+
+1. **Netzwerk anlegen** (einmalig, im Unraid-Terminal): `docker network create arsse`. Im Standardnetzwerk `bridge` finden sich Container nicht über ihre Namen. Außerdem unter *Settings > Docker* (erweiterte Ansicht, Docker dafür kurz anhalten) *Preserve user defined networks* auf *Yes* stellen – sonst löscht Unraid das Netzwerk beim nächsten Neustart von Docker oder des Servers, und die Container starten nicht mehr („network arsse not found“).
 2. **Templates holen:**
    ```bash
    cd /boot/config/plugins/dockerMan/templates-user
@@ -447,7 +451,7 @@ Updates holt Unraid wie bei anderen Containern (*Check for Updates*). Für Backu
 | `config.yaml` | Eigene Einstellungen des Intelligence Layers (falls vorhanden) |
 | `env` | Kopie der `.env` mit allen Passwörtern (Rechte 600) |
 
-Sicherungen, die älter als `BACKUP_KEEP_DAYS` Tage sind (Standard 14), löscht das Skript danach. Die Sicherungen enthalten Passwörter – legen Sie eine Kopie auf ein anderes Laufwerk. Auf Unraid planen Sie das Skript mit dem Plugin *User Scripts*, z.B. täglich:
+`miniflux.dump` und `env` sind Pflicht; scheitert einer der anderen Teile (z.B. läuft der Intelligence Layer gerade nicht), meldet das Skript eine Warnung und behält die Sicherung ohne ihn. Sicherungen, die älter als `BACKUP_KEEP_DAYS` Tage sind (Standard 14), löscht das Skript danach. Die Sicherungen enthalten Passwörter – legen Sie eine Kopie auf ein anderes Laufwerk. Auf Unraid planen Sie das Skript mit dem Plugin *User Scripts*, z.B. täglich:
 
 ```bash
 #!/bin/bash
@@ -480,7 +484,14 @@ docker compose pull    # neue Images (Miniflux, Intelligence Layer)
 docker compose up -d
 ```
 
-Solange es noch keine Release-Version gibt, meldet `docker compose pull` das Intelligence-Image als nicht gefunden; dann `docker compose up -d --build`. Wer `intelligence/config.yaml` früher selbst geändert hat, liest vorher [Konfiguration](#konfiguration).
+Solange es noch keine Release-Version gibt, meldet `docker compose pull` das Intelligence-Image als nicht gefunden; `docker compose up -d` baut es dann aus dem lokalen Code (`--build` erzwingt das immer).
+
+**Erstes Update von einer älteren Version** (ohne `scripts/backup.sh` und ohne `${DATA_PATH}/intelligence/config.yaml`):
+
+1. Wer `intelligence/config.yaml` selbst geändert hat, übernimmt die Änderungen zuerst wie unter [Konfiguration](#konfiguration) beschrieben (sonst verweigert `git pull` das Update).
+2. `git pull`, dann `scripts/backup.sh` – das Skript sichert auch den noch laufenden alten Container.
+3. `scripts/setup.sh` ausführen (legt die eigene `config.yaml` an und übernimmt übrig gebliebene Änderungen), dann `docker compose pull` und `docker compose up -d`.
+4. Im Log (`docker compose logs intelligence`) prüfen, ob noch Einstellungen aus `./intelligence/config.yaml` genannt werden (`differs from the shipped reference`); sie gelten vorerst weiter, gehören aber nach `${DATA_PATH}/intelligence/config.yaml`.
 
 ### PostgreSQL-Hauptversion wechseln
 
@@ -497,7 +508,7 @@ docker compose exec -T db pg_restore -U miniflux -d miniflux < "$B/miniflux.dump
 docker compose up -d
 ```
 
-Läuft alles, kann `postgresql-15.bak` weg. Zurück geht es, indem Sie das alte Verzeichnis zurückbenennen und `POSTGRES_MAJOR` wieder auf 15 setzen. Dependabot schlägt Hauptversionen von PostgreSQL deshalb nicht vor.
+Läuft alles, kann `postgresql-15.bak` weg. Zurück geht es, indem Sie das alte Verzeichnis zurückbenennen und `POSTGRES_MAJOR` wieder auf 15 setzen.
 
 ## Troubleshooting
 
@@ -542,11 +553,11 @@ Abhängigkeiten ändern: `requirements.in` anpassen und `requirements.txt` neu e
 pip-compile --generate-hashes --output-file=requirements.txt requirements.in
 ```
 
-Dependabot schlägt wöchentlich Updates für Python-Pakete, Basis-Image, Miniflux und die GitHub Actions vor; jeder Vorschlag durchläuft alle Tests. Neue PostgreSQL-Hauptversionen schlägt er nicht vor (siehe [Backup und Updates](#backup-und-updates)).
+Dependabot schlägt wöchentlich Updates für Python-Pakete, Basis-Image, Miniflux und die GitHub Actions vor; jeder Vorschlag durchläuft alle Tests. PostgreSQL verfolgt er nicht, weil `docker-compose.yml` die Version über `POSTGRES_MAJOR` wählt (Variablen im Image-Namen überspringt Dependabot): Kleine Updates bringt `docker compose pull` innerhalb der Hauptversion, den Wechsel der Hauptversion machen Sie von Hand (siehe [Backup und Updates](#backup-und-updates)). Dasselbe gilt für das eigene Image (`ARSSE_VERSION`).
 
-**Release:** Jeder Push auf den Hauptzweig veröffentlicht nach bestandenen Tests `ghcr.io/zwaetschge/arsse-intelligence:edge` und `:sha-<commit>`, ein Tag `vX.Y.Z` zusätzlich `:X.Y.Z`, `:X.Y` und `:latest` (`.github/workflows/release.yml`, amd64 und arm64). Pull Requests veröffentlichen nie etwas.
+**Release:** Jeder Push auf den Hauptzweig veröffentlicht nach bestandenen Tests `ghcr.io/zwaetschge/arsse-intelligence:edge` und `:sha-<commit>`, ein Tag `vX.Y.Z` zusätzlich `:X.Y.Z`, `:X.Y` und `:latest` (`.github/workflows/release.yml`, amd64 und arm64). Pull Requests veröffentlichen nie etwas. Nach der ersten Veröffentlichung ist das Paket in der GitHub Container Registry noch privat: unter *Package settings* einmalig auf *Public* stellen, sonst scheitern `docker compose pull` und das Unraid-Template ohne Anmeldung.
 
-Integrationstest mit echtem Miniflux (braucht Docker, kollidiert nicht mit einem laufenden Stack):
+Integrationstest mit echtem Miniflux (braucht Docker, kollidiert nicht mit einem laufenden Stack: eigene Namen, Ports und ein eigenes Image `arsse-it-intelligence:test`, immer aus dem lokalen Code gebaut):
 
 ```bash
 scripts/integration-test.sh

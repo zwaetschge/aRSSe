@@ -121,9 +121,9 @@ services:
       dockerfile: Dockerfile
     container_name: arsse-intelligence
     logging: *default-logging
-    # Gemessen: ~270 MB bei 2000 Artikeln (scheduling.max_entries);
-    # anpassen per docker-compose.override.yml
-    mem_limit: 768m
+    # Gemessen: ~270 MB bei 2000 Artikeln (scheduling.max_entries), ~790 MB
+    # beim Höchstwert 5000; anpassen per docker-compose.override.yml
+    mem_limit: 1g
     cpus: 1.0
     pids_limit: 128
     # Nur /app/data (und /tmp im Speicher) ist beschreibbar. Der Entrypoint
@@ -186,6 +186,11 @@ services:
       # Story-Datenbank und eigene Einstellungen (config.yaml, beim ersten
       # Start angelegt); die Referenz /app/config.yaml steckt im Image
       - ${DATA_PATH:-./data}/intelligence:/app/data
+      # Nur für den Umstieg: Ältere Versionen lasen ./intelligence/config.yaml.
+      # Dort geänderte Einstellungen gelten weiter, das Log nennt sie mit den
+      # Schritten zum Umzug nach ${DATA_PATH}/intelligence/config.yaml
+      # (README, "Updates"). Fehlt ./intelligence, legt Docker es leer an.
+      - ./intelligence:/app/legacy:ro
     depends_on:
       miniflux:
         condition: service_healthy

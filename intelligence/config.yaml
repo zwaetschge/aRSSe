@@ -151,6 +151,9 @@ scheduling:
 
   # Maximale Anzahl Artikel pro Durchlauf (1-5000; Rechenzeit und Speicher
   # wachsen quadratisch). Wird die Grenze erreicht, fehlen die ältesten Artikel.
+  # Gemessen: ~270 MB bei 2000, ~790 MB bei 5000 Artikeln; die Speichergrenze
+  # des Containers (1 GB, mem_limit in docker-compose.yml bzw. --memory im
+  # Unraid-Template) reicht für 5000. Wer die Grenze senkt, senkt auch dies.
   max_entries: 2000
 
   # Zeitfenster für Artikel-Analyse (Stunden, mindestens 1; LOOKBACK_HOURS)

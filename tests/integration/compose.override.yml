@@ -15,6 +15,10 @@ services:
       - arsse-network
   intelligence:
     container_name: arsse-it-intelligence
+    # Always the local code under a name of its own: never a pulled image,
+    # and never the production tag ghcr.io/zwaetschge/arsse-intelligence
+    image: arsse-it-intelligence:test
+    pull_policy: build
     environment:
       - CLUSTERING_INTERVAL=1
   db:

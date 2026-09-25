@@ -4,13 +4,16 @@ import hashlib
 import io
 import logging.handlers
 import os
+import re
 import sqlite3
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import miniflux
 import pytest
 import requests
+import yaml
 
 import config as config_module
 import fetch_nltk_data
@@ -126,6 +129,77 @@ def test_edited_reference_file_is_reported(tmp_path, clean_env, caplog):
     assert 'differs from the shipped defaults' not in caplog.text
 
 
+def edited_checkout(tmp_path, *replacements):
+    """./intelligence/config.yaml after 'git stash pop' kept an old edit."""
+    text = (HERE / 'config.yaml').read_text(encoding='utf-8')
+    for old, new in replacements:
+        assert old in text
+        text = text.replace(old, new)
+    (tmp_path / 'legacy').mkdir(exist_ok=True)
+    return write(tmp_path / 'legacy' / 'config.yaml', text)
+
+
+def test_old_checkout_edits_still_apply_with_a_migration_hint(tmp_path, clean_env, caplog):
+    # The published image carries the pristine reference; the user's edits
+    # live only in the checkout, which compose mounts at /app/legacy
+    legacy = edited_checkout(tmp_path, ('duplicate_action: "mark_read"',
+                                        'duplicate_action: "none"'),
+                             ('threshold: 0.75', 'threshold: 0.7'))
+    user = str(tmp_path / 'data' / 'config.yaml')
+
+    with caplog.at_level('WARNING', logger='arsse-intelligence'):
+        cfg = load_config(SHIPPED, user, legacy)
+    assert cfg.deduplication.duplicate_action == 'none'
+    assert cfg.clustering.threshold == 0.7
+    warning = caplog.text
+    assert 'clustering.threshold, deduplication.duplicate_action' in warning
+    assert user in warning and 'git checkout -- intelligence/config.yaml' in warning
+
+    # The user file wins; only what it leaves out is still taken from the checkout
+    (tmp_path / 'data').mkdir()
+    write(tmp_path / 'data' / 'config.yaml', 'clustering:\n  threshold: 0.8\n')
+    caplog.clear()
+    with caplog.at_level('WARNING', logger='arsse-intelligence'):
+        cfg = load_config(SHIPPED, user, legacy)
+    assert (cfg.clustering.threshold, cfg.deduplication.duplicate_action) == (0.8, 'none')
+    assert 'differs from the shipped reference: deduplication.duplicate_action.' in caplog.text
+
+    # Moved completely: no warning any more, and the environment still wins
+    write(tmp_path / 'data' / 'config.yaml',
+          'clustering:\n  threshold: 0.7\ndeduplication:\n  duplicate_action: "none"\n')
+    clean_env.setenv('CLUSTERING_THRESHOLD', '0.65')
+    caplog.clear()
+    with caplog.at_level('WARNING', logger='arsse-intelligence'):
+        cfg = load_config(SHIPPED, user, legacy)
+    assert cfg.clustering.threshold == 0.65
+    assert caplog.text == ''
+
+
+def test_unchanged_missing_or_unreadable_checkout_file_is_ignored(tmp_path, clean_env, caplog):
+    user = str(tmp_path / 'data' / 'config.yaml')
+    pristine = edited_checkout(tmp_path)
+    with caplog.at_level('INFO', logger='arsse-intelligence'):
+        assert changed_settings(load_config(SHIPPED, user, pristine)) == []
+        load_config(SHIPPED, user, str(tmp_path / 'missing' / 'config.yaml'))
+        # Compose Manager without a checkout: Docker creates an empty directory
+        load_config(SHIPPED, user, str(tmp_path / 'data'))
+    assert 'legacy' not in caplog.text
+
+    broken = write(tmp_path / 'legacy' / 'config.yaml', 'web:\n  min_sources: [3\n')
+    with caplog.at_level('WARNING', logger='arsse-intelligence'):
+        cfg = load_config(SHIPPED, user, broken)
+    assert cfg.web.min_sources == 2
+    assert 'Ignoring the old settings file' in caplog.text
+
+
+def test_compose_mounts_the_checkout_for_the_migration_hint():
+    compose = yaml.safe_load((HERE.parent / 'docker-compose.yml').read_text(encoding='utf-8'))
+    volumes = compose['services']['intelligence']['volumes']
+    legacy = os.path.dirname(config_module.LEGACY_CONFIG_PATH)
+    assert f'./intelligence:{legacy}:ro' in volumes
+    assert news_clustering.LEGACY_CONFIG_PATH == config_module.LEGACY_CONFIG_PATH
+
+
 def test_user_config_stub_is_created_once(tmp_path, clean_env):
     path = tmp_path / 'config.yaml'
     assert ensure_user_config(str(path))
@@ -183,8 +257,9 @@ def test_error_message_hides_url_credentials(config):
 def test_rejected_api_key_is_shown_on_healthz_and_front_page(config, store):
     client = FakeClient(sample_entries())
     client.error = http_error(miniflux.AccessUnauthorized, 401)
+    started = datetime.now(timezone.utc)
     NewsClusterer(config, store, client=client).run_clustering_cycle()
-    http = create_app(config, store).test_client()
+    http = create_app(config, store, started=started).test_client()
 
     response = http.get('/healthz')
     body = response.get_json()
@@ -215,10 +290,13 @@ def test_error_keeps_its_start_time_while_it_repeats(config, store):
 
 def test_missing_api_key_is_stored_by_the_scheduler(config, store):
     config.miniflux_api_key = ''
+    # main() takes the start time before the scheduler: a first run that
+    # fails before the web server is up still ends 'starting'
+    started = datetime.now(timezone.utc)
     run_scheduler(config, store, StopAfter(1),
                   lambda: NewsClusterer(config, store))
     assert store.get_meta('last_error')['message'] == 'MINIFLUX_API_KEY fehlt'
-    http = create_app(config, store).test_client()
+    http = create_app(config, store, started=started).test_client()
     assert http.get('/healthz').status_code == 503
 
 
@@ -238,6 +316,25 @@ def test_healthz_starting_ok_and_stale(config, store):
     assert (response.status_code, response.get_json()['status']) == (503, 'stale')
 
 
+def test_healthz_ignores_an_error_from_before_the_restart(config, store):
+    # E.g. a wrong API key, fixed by the user, then the container restarted
+    record_error(store, config, MissingApiKeyError())
+    error = store.get_meta('last_error')
+    error.update(at='2020-01-01T00:00:00+00:00', last='2020-01-01T00:05:00+00:00')
+    store.set_meta('last_error', error)
+    http = create_app(config, store).test_client()
+    response = http.get('/healthz')
+    assert (response.status_code, response.get_json()['status']) == (200, 'starting')
+    # The error is still reported until the next run
+    assert response.get_json()['last_error']['message'] == 'MINIFLUX_API_KEY fehlt'
+
+    # The same error again after the start: 'at' stays, 'last' moves on
+    record_error(store, config, MissingApiKeyError())
+    assert store.get_meta('last_error')['at'] == '2020-01-01T00:00:00+00:00'
+    response = http.get('/healthz')
+    assert (response.status_code, response.get_json()['status']) == (503, 'stale')
+
+
 def test_retry_backoff_is_capped_at_five_minutes(config, store):
     config.scheduling.interval_minutes = 60
     stop = StopAfter(8)
@@ -250,6 +347,26 @@ def test_retry_backoff_never_exceeds_a_short_interval(config, store):
     stop = StopAfter(4)
     run_scheduler(config, store, stop, lambda: FakeClusterer([1, 1, 1, 1]))
     assert stop.waits == [10, 20, 40, 60]
+
+
+# --- Limits ------------------------------------------------------------------
+
+def parse_bytes(value):
+    number, unit = re.fullmatch(r'(\d+)([kmg]?)b?', str(value).lower()).groups()
+    return int(number) * 1024 ** ' kmg'.index(unit or ' ')
+
+
+def test_memory_limit_fits_the_largest_allowed_run():
+    # Measured peak RSS of one clustering cycle (OPENBLAS_NUM_THREADS=1):
+    # ~176 MiB after the imports, plus ~3.2 dense n x n float64 matrices
+    # (273 MiB at 2000, 568 at 4000, 788 at 5000 articles). Rounded up for
+    # the web server threads; a limit below this OOM-kills every cycle.
+    n = config_module.MAX_ENTRIES_LIMIT
+    peak = 200 * 1024 ** 2 + 3.5 * n * n * 8
+    compose = yaml.safe_load((HERE.parent / 'docker-compose.yml').read_text(encoding='utf-8'))
+    assert parse_bytes(compose['services']['intelligence']['mem_limit']) >= peak
+    template = (HERE.parent / 'unraid' / 'arsse-intelligence.xml').read_text(encoding='utf-8')
+    assert parse_bytes(re.search(r'--memory=(\S+)', template).group(1)) >= peak
 
 
 # --- Logs --------------------------------------------------------------------

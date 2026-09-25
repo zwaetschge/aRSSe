@@ -5,12 +5,15 @@ Handles loading and validation of configuration from environment
 variables and YAML configuration files.
 
 Precedence: defaults < /app/config.yaml (baked into the image, reference
-only) < /app/data/config.yaml (optional user settings next to the story
-database) < environment variables. Each file only changes the settings it
-names. Empty environment variables are ignored, so docker-compose can pass
-variables through without clobbering values from the files.
+only) < /app/legacy/config.yaml (settings edited in ./intelligence/config.yaml
+by older versions, until they are moved) < /app/data/config.yaml (optional
+user settings next to the story database) < environment variables. Each
+file only changes the settings it names. Empty environment variables are
+ignored, so docker-compose can pass variables through without clobbering
+values from the files.
 """
 
+import copy
 import dataclasses
 import ipaddress
 import logging
@@ -30,6 +33,10 @@ DEFAULT_CONFIG_PATH = '/app/config.yaml'
 # Optional user settings next to the story database (in appdata backups,
 # untouched by image updates and 'git pull')
 USER_CONFIG_PATH = '/app/data/config.yaml'
+# The checkout's intelligence/config.yaml, mounted read-only by
+# docker-compose.yml: older versions mounted it as /app/config.yaml and the
+# README said to edit it. Its edits still apply until they are moved.
+LEGACY_CONFIG_PATH = '/app/legacy/config.yaml'
 # Commented template copied to USER_CONFIG_PATH when it is missing
 USER_CONFIG_STUB = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 'config.stub.yaml')
@@ -242,7 +249,8 @@ class Config:
 
 
 def load_config(config_path: Optional[str] = None,
-                user_config_path: Optional[str] = None) -> Config:
+                user_config_path: Optional[str] = None,
+                legacy_config_path: Optional[str] = None) -> Config:
     """
     Load configuration from YAML files and environment variables.
 
@@ -255,6 +263,11 @@ def load_config(config_path: Optional[str] = None,
             own settings. Given only in the service (layered mode): then a
             config_path that differs from the defaults is reported, since
             it was edited in place (see _warn_edited_reference).
+        legacy_config_path: Path to the checkout's intelligence/config.yaml
+            (LEGACY_CONFIG_PATH in the service). Where it differs from
+            config_path, it applies between config_path and the user file,
+            with a warning naming the settings to move (see
+            _apply_legacy_config). Unreadable or invalid files are skipped.
 
     Returns:
         Config object with all settings.
@@ -269,9 +282,14 @@ def load_config(config_path: Optional[str] = None,
         _apply_yaml_config(config, base)
         if user_config_path is not None:
             _warn_edited_reference(config_path, config, user_config_path)
+    legacy = _read_legacy_yaml(legacy_config_path, base)
     user = _read_yaml(user_config_path)
-    if user:
+    if legacy:
+        config = _apply_legacy_config(config, legacy, legacy_config_path,
+                                      user, user_config_path)
+    elif user:
         _apply_yaml_config(config, user)
+    if user:
         logger.info("Using settings from %s", user_config_path)
 
     _apply_env_config(config)
@@ -332,6 +350,80 @@ def _warn_edited_reference(path: str, config: Config, user_config_path: str) -> 
                        "'git pull' do not keep them. Move them to %s (on the server: "
                        "DATA_PATH/intelligence/config.yaml; README, 'Konfiguration').",
                        path, ', '.join(changed), user_config_path)
+
+
+def _read_legacy_yaml(path: Optional[str], base: Optional[dict]) -> Optional[dict]:
+    """
+    Read the checkout's old config.yaml; None if missing or like the reference.
+
+    Never raises: the file is only read to carry old edits over, so an
+    unreadable one (e.g. a checkout the service user cannot read) is
+    skipped with a warning instead of stopping the service.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        legacy = _read_yaml(path)
+    except ConfigError as e:
+        logger.warning("Ignoring the old settings file: %s", e)
+        return None
+    if not legacy or legacy == (base or {}):
+        return None
+    return legacy
+
+
+def _apply_legacy_config(config: Config, legacy: dict, legacy_path: str,
+                         user: Optional[dict], user_config_path: Optional[str]) -> Config:
+    """
+    Apply edits of the checkout's old config.yaml below the user file.
+
+    Older versions mounted ./intelligence/config.yaml as the configuration,
+    and the README said to edit it. The published image no longer reads
+    it, so without this layer such edits would be dropped silently on the
+    first update. Settings the user file already sets win; the others
+    still apply and are named in a warning with the steps to move them.
+
+    Returns:
+        The configuration with the old file and the user file applied.
+    """
+    with_legacy = copy.deepcopy(config)
+    _apply_yaml_config(with_legacy, legacy)
+    if user:
+        _apply_yaml_config(config, user)
+        # Same file again: its warnings were just logged
+        with _quiet(logger):
+            _apply_yaml_config(with_legacy, user)
+    without = _flatten(config)
+    pending = [name for name, value in _flatten(with_legacy).items()
+               if value != without[name]]
+    if pending:
+        logger.warning("%s (./intelligence/config.yaml of your checkout, mounted by "
+                       "docker-compose.yml) differs from the shipped reference: %s. "
+                       "These settings still apply, but only to ease the move, and a "
+                       "later version will ignore that file. Copy them to %s (on the "
+                       "server: DATA_PATH/intelligence/config.yaml), then undo the edit "
+                       "with 'git checkout -- intelligence/config.yaml' (README, 'Updates').",
+                       legacy_path, ', '.join(pending), user_config_path or USER_CONFIG_PATH)
+        return with_legacy
+    logger.info("%s (./intelligence/config.yaml of your checkout) differs from the shipped "
+                "reference but changes nothing that %s does not set. Undo the edit with "
+                "'git checkout -- intelligence/config.yaml' so 'git pull' keeps working.",
+                legacy_path, user_config_path or USER_CONFIG_PATH)
+    return config
+
+
+class _quiet:
+    """Context manager that mutes a logger (repeated warnings)."""
+
+    def __init__(self, target: logging.Logger):
+        self.target = target
+        self.disabled = target.disabled
+
+    def __enter__(self):
+        self.target.disabled = True
+
+    def __exit__(self, *exc):
+        self.target.disabled = self.disabled
 
 
 def ensure_user_config(path: str, stub_path: str = USER_CONFIG_STUB) -> bool:
