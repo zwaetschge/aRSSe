@@ -1,25 +1,81 @@
 {% extends "base.html" %}
-{% block title %}{{ story.headline.title }}{% endblock %}
+{% macro row(a) %}
+<li{% if a.is_duplicate %} class="duplicate"{% endif %}><a href="{{ entry_link(a) }}"><b>{{ a.feed_title }}:</b> {{ display_title(a, false) }} {{ a.published_at | clock }}</a>
+  {%- if safe_url(a.url) %}
+  <a class="original meta" href="{{ safe_url(a.url) }}" rel="noopener noreferrer" aria-label="Original bei {{ a.feed_title or 'der Quelle' }}">Original <span aria-hidden="true">↗</span></a>
+  {%- endif %}</li>
+{% endmacro %}
+{% block title %}{{ display_title(story.headline) }}{% endblock %}
 {% block content %}
 <article class="story">
-  <h2><a href="{{ entry_link(story.headline) }}">{{ story.headline.title }}</a></h2>
+  <h2><a href="{{ entry_link(story.headline) }}">{{ display_title(story.headline) }}</a></h2>
   <div class="meta">
     {{ story.source_count }} Quellen, {{ story.article_count }} Artikel
-    · zuerst gesehen {{ story.first_seen | ago }}
+    · Erste Meldung {{ first.published_at | clock }} ({{ first.feed_title }})
+    {%- if last.id != first.id %} · zuletzt {{ last.published_at | clock }} ({{ last.feed_title }}){% endif %}
+    {%- if story.new_count %} · <span class="new">{{ story.new_count }} neu</span>{% elif not story.unread_count %} · gelesen{% endif %}
   </div>
   {% if story.headline.snippet %}<p class="snippet">{{ story.headline.snippet }}</p>{% endif %}
+  {% if can_mark_read and story.unread_count %}
+  {# next defaults to the front page, so it is left out there #}
+  <form method="post" action="/story/{{ story.id }}/gelesen">{% if here() != '/' %}<input type="hidden" name="next" value="{{ here() }}">{% endif %}<button>Story gelesen ({{ story.unread_count }})</button></form>
+  {% endif %}
 
+  <nav class="views" aria-label="Ansicht">
+    {% if chronological %}<a href="{{ nav('/story/' ~ story.id) }}">Nach Aktualität</a><span aria-current="page">Chronologisch</span>
+    {%- else %}<span aria-current="page">Nach Aktualität</span><a href="{{ nav('/story/' ~ story.id, ansicht='chronologisch') }}">Chronologisch</a>{% endif %}
+  </nav>
+
+  {% if chronological %}
+  {% for day, articles in timeline(originals) %}
+  <h3>{{ day }}</h3>
   <ul class="coverage">
-    {% for a in story.articles %}
-    <li class="{{ 'duplicate' if a.is_duplicate }}">
-      <span class="source">{{ a.feed_title }}</span>:
-      <a href="{{ entry_link(a) }}">{{ a.title }}</a>
-      <span class="meta">{{ a.published_at | ago }}</span>
-      {% if a.is_duplicate %}<span class="label">Duplikat</span>{% endif %}
-      {% if safe_url(a.url) %}· <a class="meta" href="{{ safe_url(a.url) }}" rel="noopener noreferrer">Original</a>{% endif %}
-    </li>
+    {% for a in articles %}
+    <li><a href="{{ entry_link(a) }}">{{ a.published_at | clock }} <b>{{ a.feed_title }}:</b> {{ display_title(a, false) }}
+      {%- if a.snippet and a.title %}<span class="line meta">{{ a.snippet }}</span>{% endif %}</a></li>
     {% endfor %}
   </ul>
+  {% endfor %}
+  {% else %}
+  <ul class="coverage">
+    {% for a in originals %}{{ row(a) }}{% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if duplicates %}
+  <details>
+    <summary>Gleichlautende Meldungen ({{ duplicates | length }})</summary>
+    <ul class="coverage">
+      {% for a in duplicates %}{{ row(a) }}{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+
+  {% if story.earlier_articles %}
+  <h3>Frühere Berichte</h3>
+  {# Only in-window articles are checked against Miniflux: older ones may
+     have been deleted there (flush history, removed feed), so they link to
+     the publisher instead of a possibly dead Miniflux entry #}
+  <ul class="coverage">
+    {% for a in story.earlier_articles %}
+    <li{% if a.is_duplicate %} class="duplicate"{% endif %}>
+      {%- if safe_url(a.url) %}<a href="{{ safe_url(a.url) }}" rel="noopener noreferrer"><b>{{ a.feed_title }}:</b> {{ display_title(a, false) }} {{ a.published_at | clock }}</a>
+      {%- else %}<div class="plain"><b>{{ a.feed_title }}:</b> {{ display_title(a, false) }} {{ a.published_at | clock }}</div>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% if story.earlier_count > story.earlier_articles | length %}
+  <p class="meta">und {{ story.earlier_count - story.earlier_articles | length }} ältere</p>
+  {% endif %}
+  {% endif %}
+
+  {% if related %}
+  <h3>Verwandte Stories</h3>
+  <ul class="coverage">
+    {% for r in related %}
+    <li><a href="{{ nav('/story/' ~ r.id) }}">{{ display_title(r.headline) }} <span class="meta">{{ r.source_count }} Quellen · {{ r.articles[0].published_at | clock }}</span></a></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
 </article>
-<a class="more" href="/">← Zurück zu Top Stories</a>
+<a class="more" href="{{ nav('/') }}"><span aria-hidden="true">←</span> Zurück zu Top Stories</a>
 {% endblock %}

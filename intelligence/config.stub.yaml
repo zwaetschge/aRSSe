@@ -1,0 +1,34 @@
+# ===========================================
+# aRSSe Intelligence Layer – eigene Einstellungen
+# ===========================================
+# Diese Datei liegt im Datenverzeichnis (DATA_PATH/intelligence/config.yaml,
+# Unraid: /mnt/user/appdata/arsse/intelligence/config.yaml) und bleibt bei
+# Updates des Images und bei 'git pull' erhalten.
+#
+# Hier nur eintragen, was vom Standard abweichen soll. Alle Einstellungen
+# mit Erklärung stehen in intelligence/config.yaml im Repository (im
+# Container: /app/config.yaml); die Datei dort nicht ändern.
+#
+# Reihenfolge: Standard < /app/config.yaml < diese Datei < Umgebungsvariablen
+# (.env bzw. Unraid-Template). Abschnitte werden zusammengeführt: Es gilt
+# jede Einstellung, die hier steht, alle anderen behalten ihren Standard.
+# Listen und Tabellen (z.B. source_scores) ersetzen den Standard ganz.
+#
+# Änderungen gelten nach einem Neustart: docker compose restart intelligence
+#
+# Beispiele (# am Zeilenanfang entfernen, Einrückung beibehalten):
+#
+# scheduling:
+#   lookback_hours: 36
+#
+# web:
+#   min_sources: 3
+#   exclude_patterns:
+#     - '^Wetter\b'
+#     - '^Lotto'
+#
+# deduplication:
+#   canonical_strategy: "source_priority"
+#   source_scores:
+#     "tagesschau.de": 100
+#     "zeit.de": 90

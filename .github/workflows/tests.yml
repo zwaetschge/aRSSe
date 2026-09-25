@@ -3,6 +3,11 @@ name: Tests
 on:
   pull_request:
   workflow_dispatch:
+  # The release workflow runs these tests before it publishes an image
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   intelligence:
@@ -11,23 +16,75 @@ jobs:
       run:
         working-directory: intelligence
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: intelligence/requirements*.txt
+          cache-dependency-path: intelligence/requirements*
+      # The pinned versions of the image first, then the test tools
+      - run: pip install --require-hashes -r requirements.txt
       - run: pip install -r requirements-dev.txt
-      - run: python -c "import nltk, sys; sys.exit(0 if nltk.download('stopwords') else 1)"
+      - run: python fetch_nltk_data.py
       - run: pytest -q
+      - name: Test scripts/backup.sh (Docker stub)
+        run: ../scripts/test-backup.sh
+        env:
+          PYTHON: python
 
   compose:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate docker-compose.yml
         run: cp .env.example .env && docker compose config --quiet
+      - name: Check the Unraid templates against docker-compose.yml
+        run: python3 scripts/check-unraid-templates.py
       - name: Build intelligence image
         run: docker build intelligence
       - name: Check shell scripts
         run: shellcheck scripts/*.sh
+
+  setup-script:
+    # setup.sh with a stubbed docker: passwords, .env mode, BASE_URL, reruns
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: scripts/test-setup.sh
+
+  integration:
+    # Full stack against a real Miniflux: API usage, permissions, health
+    # check, hardened containers and scripts/backup.sh
+    name: integration (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Data directory prepared by the user, entrypoint drops root
+          - name: runner-uid
+            puid: ""
+            pgid: ""
+            precreate: "1"
+            legacy_user: "0"
+          # README quickstart on Unraid: Docker creates the directory as root
+          - name: unraid-99-100
+            puid: "99"
+            pgid: "100"
+            precreate: "0"
+            legacy_user: "0"
+          # Older compose files with user: PUID:PGID
+          - name: legacy-user
+            puid: ""
+            pgid: ""
+            precreate: "1"
+            legacy_user: "1"
+    env:
+      IT_PUID: ${{ matrix.puid }}
+      IT_PGID: ${{ matrix.pgid }}
+      IT_PRECREATE_DATA: ${{ matrix.precreate }}
+      IT_LEGACY_USER: ${{ matrix.legacy_user }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: scripts/integration-test.sh

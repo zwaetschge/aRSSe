@@ -1,0 +1,25 @@
+# aRSSe Intelligence Layer Dependencies (ranges; pinned in requirements.txt)
+
+# Miniflux API Client
+miniflux>=1.1,<2
+
+# Machine Learning & NLP
+scikit-learn>=1.3,<2
+nltk>=3.8,<4
+
+# HTML Processing
+beautifulsoup4>=4.12,<5
+lxml>=5,<7
+
+# Configuration
+pyyaml>=6,<7
+
+# Top Stories web interface
+flask>=3,<4
+waitress>=3,<4
+
+# Time zone data for the times shown (python:3.11-slim has no system tzdata)
+tzdata>=2024.1
+
+# Structured logging (logging.json_format)
+python-json-logger>=2,<4

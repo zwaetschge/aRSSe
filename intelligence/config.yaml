@@ -1,8 +1,23 @@
 # ===========================================
 # aRSSe Intelligence Layer Configuration
 # ===========================================
-# Reihenfolge: Defaults < diese Datei < Umgebungsvariablen (.env).
-# Leere Umgebungsvariablen werden ignoriert.
+# Referenz aller Einstellungen mit ihren Standardwerten. Diese Datei ist
+# Teil des Images (/app/config.yaml) – bitte NICHT hier ändern: Updates des
+# Images und 'git pull' würden Ihre Änderungen verwerfen bzw. blockieren.
+#
+# Eigene Einstellungen gehören nach DATA_PATH/intelligence/config.yaml
+# (im Container /app/data/config.yaml, Unraid:
+# /mnt/user/appdata/arsse/intelligence/config.yaml). Dort nur eintragen, was
+# abweichen soll, z.B.
+#   web:
+#     min_sources: 3
+# Die Datei wird beim ersten Start mit Beispielen angelegt.
+#
+# Reihenfolge: Defaults < diese Datei < DATA_PATH/intelligence/config.yaml
+# < Umgebungsvariablen (.env bzw. Unraid-Template). Leere
+# Umgebungsvariablen werden ignoriert.
+# Zahlen ohne Anführungszeichen angeben. Ungültige Werte verhindern den Start;
+# die Meldung im Log nennt die betroffene Einstellung.
 
 # Miniflux-Verbindung
 miniflux:
@@ -11,18 +26,46 @@ miniflux:
   # URL, unter der dein Browser Miniflux erreicht (für Links in Top Stories).
   # Wird von MINIFLUX_PUBLIC_URL bzw. BASE_URL überschrieben.
   public_url: "http://localhost:8080"
+  # Port von Miniflux auf dem Server (MINIFLUX_PORT). Zeigt public_url auf
+  # localhost, bauen die Top Stories ihre Links aus der aufgerufenen Adresse
+  # und diesem Port – localhost wäre auf dem E-Ink-Reader das Gerät selbst.
+  public_port: 8080
+  # Feeds und Kategorien, die in Miniflux „In globalen Listen ausblenden“
+  # tragen, erscheinen auch in den Top Stories nicht (false = trotzdem zeigen)
+  respect_hide_globally: true
 
-# Clustering-Konfiguration (DBSCAN)
+# Clustering-Konfiguration (Average Linkage)
 clustering:
-  # Epsilon: Maximale Kosinus-Distanz zwischen zwei Artikeln im selben Cluster
-  # Niedrigere Werte = striktere Gruppierung (0.3-0.6 empfohlen)
-  eps: 0.4
+  # Maximale durchschnittliche Kosinus-Distanz der Artikel einer Story.
+  # Niedriger = kleinere, schärfere Stories; höher = mehr Artikel in Stories,
+  # aber ab ca. 0.8 landen unverwandte Themen zusammen.
+  # 0.75 ist an ~500 echten, handmarkierten Artikeln aus 13 deutschen
+  # Nachrichtenfeeds kalibriert (docs/ARCHITECTURE.md, „Messungen“).
+  threshold: 0.75
 
-  # Minimum Anzahl Artikel für einen Cluster
-  min_samples: 2
+  # Mindest-Ähnlichkeit (Kosinus, 0-1) einer Story aus nur zwei Artikeln.
+  # Für zwei Artikel verlangt threshold nur 0.25 – das erreicht schon ein
+  # einziges gemeinsames seltenes Wort („Razzia“). Am Referenzsatz entfernt
+  # 0.30 von 57 Zwei-Artikel-Stories 9 der 17 unsinnigen, 7 der 14 nur
+  # themenverwandten und 3 der 26 echten; 0.35 entfernt 14 unsinnige und
+  # 5 echte. 0 = aus.
+  # Umgebungsvariable: CLUSTERING_MIN_PAIR_SIMILARITY
+  min_pair_similarity: 0.30
 
-  # Metrik für Ähnlichkeitsberechnung
-  metric: "cosine"
+  # Themen: Stories zum selben Ereignis aus verschiedenen Blickwinkeln (das
+  # Spiel, der Trainer, die Reaktionen) belegen auf der Startseite nur einen
+  # Platz; die übrigen stehen darunter als „Mehr zum Thema“. Maximale
+  # durchschnittliche Distanz eines Themas, größer als threshold; die Grenzen
+  # der Stories selbst ändern sich nicht. Am Referenzsatz fasst 0.9 34 der
+  # 63 Stories zu 15 Themen zusammen (2 davon unpassend), 0.85 17 zu 8.
+  # 0 = aus; bleibt es bei 0.9 und liegt threshold nicht darunter, sind die
+  # Themen aus (Warnung im Log). Umgebungsvariable: CLUSTERING_TOPIC_THRESHOLD
+  topic_threshold: 0.9
+
+  # Längste Wortfolge im Vokabular: 1 = einzelne Wörter. Wortpaare (2)
+  # machten Precision und Recall am Referenzsatz schlechter.
+  # Umgebungsvariable: CLUSTERING_NGRAM_MAX
+  ngram_max: 1
 
   # Maximale Features für TF-IDF Vektorisierung
   max_features: 5000
@@ -33,14 +76,46 @@ clustering:
   # Wortstämme bilden ("Bundeskanzlers" -> "bundeskanzl")
   stemming: true
 
+  # Titel, die keine Schlagzeile sein sollen, solange die Story einen
+  # anderen Artikel hat: Werbung, Paywall-Anrisse, Podcasts, Liveblogs,
+  # Videos, Wetter, Tagesüberblicke. Reguläre Ausdrücke, Groß-/Kleinschreibung
+  # egal, ^ = Titelanfang. Die Artikel bleiben in der Story. [] = aus.
+  noise_title_patterns:
+    - '^(Anzeige|heise-Angebot):'
+    - '^\((g|S)\+\)'
+    - 'heise\+'
+    - 'SPIEGEL\+'
+    - '\bF\+'
+    - 'SZ Plus'
+    - 'Podcasts?\b'
+    - 'Live-?blog|Live-?ticker|Newsblog'
+    - '^Video:'
+    - '^Wetter\b'
+    - 'News des Tages'
+    - '^Was jetzt\?'
+    - 'Briefing'
+
 # Deduplizierung
+# Duplikate sind (1) derselbe Artikel doppelt geliefert (gleiche URL, gleicher
+# Titel, gleicher oder fast gleicher Text ab threshold; auch aus verschiedenen
+# Feeds) oder (2) Artikel verschiedener Feeds mit fast gleichem Text. Der Titel
+# zählt beim Textvergleich nicht mit, und innerhalb eines Feeds gibt es sonst
+# keine Duplikate (Sendungen wie „tagesschau“ tragen täglich denselben Titel).
 deduplication:
-  # Schwellenwert für Duplikat-Erkennung (0.0-1.0)
-  # Höhere Werte = nur sehr ähnliche Artikel werden als Duplikate erkannt
+  # Schwellenwert für Duplikat-Erkennung (0.0-1.0), verglichen wird der Text
+  # ohne Titel. Höhere Werte = nur sehr ähnliche Artikel werden als Duplikate erkannt
   threshold: 0.85
+
+  # Mindestlänge des Textes (Wörter ohne Titel), damit Artikel verschiedener
+  # Feeds überhaupt verglichen werden (gilt nicht für Fall 1). Kurze
+  # Anrisstexte wie „[ mehr ]“ sagen nichts über den Artikel.
+  min_body_tokens: 25
 
   # Strategie zur Auswahl des "besten" Artikels (auch Schlagzeile der Story)
   # Optionen: "longest", "source_priority", "newest"
+  # Bei "longest" bleibt die Schlagzeile einer Story stehen, auch wenn später
+  # ein längerer Artikel dazukommt; bei "newest" und "source_priority" wechselt
+  # sie zum neuesten Bericht bzw. zur besseren Quelle.
   canonical_strategy: "longest"
 
   # Quellen-Priorisierung für "source_priority" (höher = besser, Standard 50)
@@ -56,35 +131,112 @@ deduplication:
   # Aktion für Duplikate
   #   "mark_read": Duplikate in Miniflux als gelesen markieren
   #   "none":      nur in Top Stories als Duplikat kennzeichnen
+  # Jedes Duplikat wird nur einmal markiert: Wer es in Miniflux wieder auf
+  # ungelesen setzt, behält es ungelesen.
   duplicate_action: "mark_read"
+
+  # Wo "mark_read" greift
+  #   "visible": nur in Stories, die die Startseite zeigt (web.min_sources),
+  #              doppelt gelieferte Artikel (Fall 1) überall
+  #   "all":     in allen Stories
+  mark_read_scope: "visible"
 
 # Scheduling
 scheduling:
   # Intervall zwischen Clustering-Läufen (Minuten)
   interval_minutes: 30
 
-  # Artikel pro API-Anfrage
+  # Artikel pro API-Anfrage (1-1000, mehr lehnt Miniflux ab)
   batch_size: 250
 
-  # Maximale Anzahl Artikel pro Durchlauf
+  # Maximale Anzahl Artikel pro Durchlauf (1-5000; Rechenzeit und Speicher
+  # wachsen quadratisch). Wird die Grenze erreicht, fehlen die ältesten Artikel.
+  # Gemessen: ~270 MB bei 2000, ~790 MB bei 5000 Artikeln; die Speichergrenze
+  # des Containers (1 GB, mem_limit in docker-compose.yml bzw. --memory im
+  # Unraid-Template) reicht für 5000. Wer die Grenze senkt, senkt auch dies.
   max_entries: 2000
 
-  # Zeitfenster für Artikel-Analyse (Stunden)
+  # Zeitfenster für Artikel-Analyse (Stunden, mindestens 1; LOOKBACK_HOURS)
   lookback_hours: 24
+
+  # Alle so viele Minuten fragt der Dienst Miniflux nach Artikeln, die dort
+  # seit dem letzten Mal gelesen wurden (eine kleine Anfrage), damit gelesene
+  # Stories nicht erst beim nächsten Clustering-Lauf verschwinden. 0 = aus
+  status_sync_minutes: 5
 
 # Lokale Story-Datenbank (SQLite)
 storage:
   db_path: "/app/data/arsse.db"
-  # Stories, die so lange nicht mehr aufgetaucht sind, werden gelöscht
+  # Artikel, die älter sind, und Stories, die so lange nicht mehr
+  # aufgetaucht sind, werden gelöscht
+  # (mindestens 1 und mindestens so lang wie lookback_hours; RETENTION_DAYS)
   retention_days: 7
 
 # Top-Stories-Weboberfläche
 web:
   # Der Port ist fest 8081 im Container; extern über INTELLIGENCE_PORT in .env
-  # Maximale Anzahl angezeigter Stories
-  max_stories: 50
-  # Weitere Artikel pro Story auf der Startseite
+  # Maximale Anzahl angezeigter Stories (über alle Seiten; WEB_MAX_STORIES)
+  max_stories: 100
+  # Stories pro Seite (?seite=2 usw.); kurze Seiten brauchen auf E-Ink-Readern
+  # kein Scrollen (WEB_PAGE_SIZE)
+  page_size: 10
+  # Weitere Artikel pro Story auf der Startseite (0 = nur die Schlagzeile)
   articles_per_story: 6
+  # Nur Stories aus mindestens so vielen Feeds anzeigen
+  # (blendet Werbeblöcke und Serien eines einzelnen Feeds aus).
+  # Gezählt werden nur Artikel aus dem Zeitfenster (lookback_hours).
+  # Umgebungsvariable: WEB_MIN_SOURCES
+  min_sources: 2
+  # Ältere Artikel einer Story (vor dem Zeitfenster), die ihre Seite unter
+  # „Frühere Berichte“ zusätzlich auflistet (0 = keine)
+  earlier_articles_max: 20
+  # Stories nicht anzeigen, deren Artikel (im Zeitfenster) alle einen dieser
+  # Titel haben – reguläre Ausdrücke wie bei noise_title_patterns.
+  # Standard: der Wetterbericht, den mehrere Sender bringen. [] = alle zeigen
+  exclude_patterns:
+    - '^Wetter\b'
+  # Nur Anfragen an diese Hostnamen beantworten (Schutz vor DNS-Rebinding),
+  # z.B. ["tower.local", "192.168.1.10"]. localhost und 127.0.0.1 gehen
+  # immer. Keine Platzhalter (*.example.com). Leer = jeder Hostname
+  # (WEB_ALLOWED_HOSTS, kommagetrennt)
+  allowed_hosts: []
+  # Zeitzone der angezeigten Uhrzeiten, z.B. "Europe/Vienna".
+  # Leer = TZ aus .env (Standard Europe/Berlin)
+  timezone: ""
+  # Rubriken (?rubrik=Sport): Die Kategorie des Feeds in Miniflux, außer der
+  # Standardkategorie „All“. Für Feeds dort entscheidet der Pfad der
+  # Artikel-URL: das erste Muster (in dieser Reihenfolge), das einen ganzen
+  # Abschnitt trifft, z.B. „sport“ in tagesschau.de/sport/fussball/…
+  # Reguläre Ausdrücke, Groß-/Kleinschreibung egal. {} = nur Kategorien
+  path_sections:
+    'regional(es)?|baden-wuerttemberg|bayern|berlin(-brandenburg)?|brandenburg|bremen|hamburg(-schleswig-holstein)?|hessen|mecklenburg-vorpommern|niedersachsen|nordrhein-westfalen|nrw|rheinland-pfalz|saarland|sachsen|sachsen-anhalt|schleswig-holstein|th(ue|ü)ringen': Regional
+    'sport|fussball\w*': Sport
+    'wissen|technik|digital|netzwelt': Technik
+    'wirtschaft|finanzen': Wirtschaft
+    'kultur|feuilleton': Kultur
+    'panorama|gesellschaft': Panorama
+    'politik|inland|ausland': Politik
+
+  # Zugriffsschutz (README, Abschnitt "Absicherung"). /healthz und /static/
+  # (Manifest und Icons für den Startbildschirm) bleiben offen.
+  auth:
+    # "none":  offen für alle, die den Port erreichen (beim Start: Warnung)
+    # "basic": Anmeldung mit username/password (HTTP Basic Auth)
+    # "proxy": Ein Reverse Proxy (z.B. Authelia) meldet an und übergibt den
+    #          Benutzer in proxy_header
+    # Umgebungsvariable: WEB_AUTH_MODE
+    mode: "none"
+    # Für "basic"; besser über WEB_USERNAME und WEB_PASSWORD bzw.
+    # WEB_PASSWORD_FILE in .env als hier im Klartext
+    username: ""
+    password: ""
+    password_file: ""
+    # Für "proxy": Header mit dem Benutzernamen (WEB_AUTH_PROXY_HEADER, nur
+    # Buchstaben, Ziffern und "-") und die Adressen des Proxys
+    # (WEB_TRUSTED_PROXIES), z.B. ["172.18.0.5/32"]; 0.0.0.0/0 wird
+    # abgelehnt. Von allen anderen Adressen wird die Anfrage abgelehnt.
+    proxy_header: "Remote-User"
+    trusted_proxies: []
 
 # Logging
 logging:
@@ -94,5 +246,6 @@ logging:
   # JSON-Format für strukturierte Logs
   json_format: false
 
-  # Zusätzliche Log-Datei (leer = nur stdout), z.B. "/app/data/intelligence.log"
+  # Zusätzliche Log-Datei (leer = nur stdout), z.B. "/app/data/intelligence.log".
+  # Wird bei 5 MB rotiert, drei ältere Dateien bleiben (.1 bis .3)
   file: ""

@@ -5,19 +5,49 @@ Miniflux cannot store tags or custom metadata via its API, so clustering
 results live in a small SQLite database that the web interface reads.
 
 Story IDs are stable across clustering runs: a new cluster inherits the
-ID of the previous story that shares the most articles with it.
+ID of the previous story it continues (see _match_story_ids). Only
+articles inside the lookback window count for a story's sources and
+rank; older ones stay attached as earlier coverage until retention.
+
+Read state: a story whose articles in the window are all read leaves the
+front page (hide_read). Articles the user marked read with 'Story gelesen'
+are recorded in user_read, apart from the duplicates aRSSe marked itself
+(auto_marked), which rank last as a story's canonical article.
+
+Topics: stories about the same event from different angles share a
+topic_key; the front page shows the best-ranked one and lists the others
+as 'Mehr zum Thema' (group_topics).
+
+The schema is versioned with ``PRAGMA user_version``; see MIGRATIONS.
 """
 
 import json
+import logging
+import os
+import re
 import sqlite3
 import uuid
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Iterator, Optional
+from typing import Iterable, Iterator, Optional
 
-SCHEMA = """
+logger = logging.getLogger('arsse-intelligence')
+
+# Feeds are untrusted input; real titles stay far below this
+MAX_TITLE_CHARS = 500
+
+# Default for web.earlier_articles_max: older articles shown on a story page
+EARLIER_ARTICLES_MAX = 20
+
+# Entries dated at most this far past the fetch cutoff are never pruned as
+# deleted: Miniflux filters with a strict '>' on whole seconds
+PRUNE_MARGIN = timedelta(seconds=60)
+
+# Schema of the first release. Databases created before schema versioning
+# (user_version 0 with these tables present) are treated as version 1.
+SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS entries (
     id           INTEGER PRIMARY KEY,
     feed_id      INTEGER,
@@ -50,6 +80,98 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
 
+# published_at becomes the clamped date (see _entry_row) in the fixed format
+# of db_timestamp(); the date as delivered by Miniflux moves to
+# published_at_raw. Version 1 stored UTC isoformat, sometimes with
+# microseconds, which the UPDATE cuts off.
+SCHEMA_V2 = """
+ALTER TABLE entries ADD COLUMN created_at TEXT;
+ALTER TABLE entries ADD COLUMN published_at_raw TEXT;
+UPDATE entries SET published_at = substr(published_at, 1, 19) || '+00:00'
+    WHERE length(published_at) > 25;
+"""
+
+# Duplicates aRSSe marked read in Miniflux. A duplicate is marked only once:
+# if the user sets it back to unread, that decision stands. save_run never
+# touches this table; marked_at moves forward while the entry is still
+# fetched (refresh_auto_marked), and cleanup drops rows once it is not.
+#
+# Earlier versions marked every unread duplicate read in each run and then
+# stored it as read, and picked the canonical copy differently (ties went to
+# the highest ID, 'longest' counted HTML). Without seeding, the first run
+# after the upgrade could keep the copy already marked read and mark the
+# other one too. A duplicate the user read themselves is seeded as well;
+# that only makes an unread copy the canonical one, which is harmless.
+# marked_at uses the format of db_timestamp().
+SCHEMA_V3 = """
+CREATE TABLE auto_marked (
+    entry_id  INTEGER PRIMARY KEY,
+    marked_at TEXT NOT NULL
+);
+INSERT INTO auto_marked (entry_id, marked_at)
+    SELECT e.id, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now') FROM entries e
+    JOIN story_entries se ON se.entry_id = e.id
+    WHERE se.is_duplicate = 1 AND e.status = 'read';
+"""
+
+
+# Sections (Rubriken), topics and the user's read marks. user_read holds the
+# articles the user marked read with 'Story gelesen' (never auto_marked
+# duplicates); read_at uses the format of db_timestamp(). The index serves
+# the per-article retention cleanup and the time window.
+SCHEMA_V4 = """
+ALTER TABLE entries ADD COLUMN section TEXT;
+ALTER TABLE stories ADD COLUMN topic_key INTEGER;
+CREATE INDEX idx_entries_published ON entries(published_at);
+CREATE TABLE user_read (
+    entry_id INTEGER PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+    read_at  TEXT NOT NULL
+);
+"""
+
+# Longest search query accepted (/suche)
+MAX_QUERY_CHARS = 100
+
+
+class _Rebuild:
+    def __repr__(self) -> str:
+        return 'REBUILD'
+
+
+# Marks a schema change that cannot be migrated in place. The store only
+# caches what Miniflux holds, so an existing database is moved aside to
+# arsse.db.v<N>.bak and rebuilt; only story IDs, first_seen and the record
+# of duplicates marked read (auto_marked) are lost.
+REBUILD = _Rebuild()
+
+# Append-only: MIGRATIONS[i] turns schema version i into version i + 1.
+# Never edit or reorder a released entry; add a new one (SQL script or
+# REBUILD) instead. Every script runs in one transaction together with the
+# version bump, so a failing migration leaves the database untouched.
+MIGRATIONS = [
+    SCHEMA_V1,
+    SCHEMA_V2,
+    SCHEMA_V3,
+    SCHEMA_V4,
+]
+
+
+class StoreTooNewError(RuntimeError):
+    """The database was written by a newer aRSSe version."""
+
+
+@dataclass
+class FetchResult:
+    """Entries of one fetch from Miniflux and how complete it is."""
+    entries: list
+    # published_after sent to Miniflux
+    cutoff: datetime
+    # False when max_entries cut the fetch short (only the newest IDs came back)
+    complete: bool = True
+    # Smallest entry ID fetched, None for an empty fetch
+    min_id: Optional[int] = None
+    fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
 
 @dataclass
 class ClusterResult:
@@ -57,6 +179,30 @@ class ClusterResult:
     entry_ids: list
     headline_entry_id: int
     duplicate_ids: set
+    # Duplicates that are the same item listed twice (same URL and title,
+    # same or nearly the same text as a better-ranked copy that joined the
+    # same group); a subset of duplicate_ids
+    copy_ids: set = field(default_factory=set)
+    # Members unfit to head the story: no title, or a title matching
+    # clustering.noise_title_patterns (ads, podcasts, live blogs, ...)
+    noise_ids: set = field(default_factory=set)
+    # Stories with the same topic_key are about one event (the smallest
+    # entry ID of their topic group); None = a topic of its own
+    topic_key: Optional[int] = None
+
+
+@dataclass
+class FrontPage:
+    """One page of the front page (StoryStore.front_page)."""
+    # Best-ranked story of each topic on this page, the rest in 'related'
+    stories: list
+    # Topic groups on all pages (what the pages count)
+    total: int
+    # [(section, topic groups)], most first; counts ignore the chosen section
+    sections: list = field(default_factory=list)
+    # Topic groups of the chosen section that only read stories fill
+    # (what ?alle=1 adds; 0 unless hide_read)
+    hidden_read: int = 0
 
 
 def _now() -> str:
@@ -68,8 +214,79 @@ class StoryStore:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        with self._connect() as conn:
-            conn.executescript(SCHEMA)
+        # Error of the last run that could not be stored in meta 'last_error'
+        # (the database itself is not writable); see last_error()
+        self.unsaved_error = None
+        rebuild_from = self._migrate()
+        if rebuild_from is not None:
+            self._move_aside(rebuild_from)
+            self._migrate()
+
+    def _migrate(self) -> Optional[int]:
+        """
+        Bring the schema to the latest version in one transaction.
+
+        Returns:
+            The current version if a pending migration is REBUILD (nothing
+            was changed then), else None.
+
+        Raises:
+            StoreTooNewError: The database is newer than this code.
+        """
+        latest = len(MIGRATIONS)
+        conn = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            # IMMEDIATE: a second process waits instead of migrating twice
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+                if version > latest:
+                    raise StoreTooNewError(
+                        f"Datenbank stammt von neuerer aRSSe-Version (Schema {version}, "
+                        f"diese Version kennt bis {latest}) – Backup einspielen oder "
+                        f"{os.path.basename(self.db_path)} löschen ({self.db_path})")
+                if version == 0 and _has_table(conn, 'entries'):
+                    version = 1  # created before schema versioning
+                pending = MIGRATIONS[version:]
+                if version > 0 and any(m is REBUILD for m in pending):
+                    conn.execute("ROLLBACK")
+                    return version
+                for migration in pending:
+                    if migration is not REBUILD:  # a new database needs no rebuild
+                        for statement in _statements(migration):
+                            conn.execute(statement)
+                conn.execute(f"PRAGMA user_version = {latest}")
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
+        if pending:
+            logger.info("Story database %s migrated from schema %d to %d",
+                        self.db_path, version, latest)
+        return None
+
+    def _move_aside(self, version: int) -> None:
+        """Rename the database to <db>.v<version>.bak so it can be rebuilt."""
+        backup = f"{self.db_path}.v{version}.bak"
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        try:
+            # Fold the WAL into the main file so the backup is complete
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
+        os.replace(self.db_path, backup)
+        for suffix in ('-wal', '-shm'):
+            try:
+                os.remove(self.db_path + suffix)
+            except FileNotFoundError:
+                pass
+        logger.warning("Story database schema %d cannot be migrated in place; moved "
+                       "it to %s and starting with an empty database (stories are "
+                       "rebuilt from Miniflux in the next run)", version, backup)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -84,60 +301,94 @@ class StoryStore:
         finally:
             conn.close()
 
-    def save_run(self, entries: list, clusters: list) -> dict:
+    def save_run(self, entries: list, clusters: list,
+                 fetch: Optional[FetchResult] = None, min_sources: int = 1,
+                 sticky_headline: bool = True) -> dict:
         """
         Persist the result of a clustering run.
 
         Args:
             entries: Miniflux entry dicts that were part of this run.
             clusters: ClusterResult objects found in this run.
+            fetch: How the entries were fetched. Its fetched_at caps future
+                publication dates (defaults to now); with it, stored
+                articles that Miniflux no longer returns are removed.
+            min_sources: Feeds a story needs to be shown (web.min_sources);
+                story IDs that were visible are kept in preference.
+            sticky_headline: A story keeps its headline while that article
+                is still a member, not noise (cluster.noise_ids) and not a
+                duplicate, even if the cluster picked another one (see
+                _sticky_headline). Only meant for canonical_strategy
+                'longest'; with False the cluster's pick is stored.
 
         Returns:
             Mapping of cluster index to the story ID it was stored under.
         """
         now = _now()
-        run_ids = [e['id'] for e in entries]
-        assigned = {}
+        fetched_at = fetch.fetched_at if fetch else datetime.now(timezone.utc)
+        rows = [_entry_row(e, fetched_at) for e in entries]
+        feed_of = {row['id']: _feed_key(row) for row in rows}
 
         with self._connect() as conn:
             conn.executemany(
                 """INSERT INTO entries (id, feed_id, feed_title, title, url,
-                                        published_at, snippet, status)
+                                        published_at, published_at_raw, created_at,
+                                        snippet, status, section)
                    VALUES (:id, :feed_id, :feed_title, :title, :url,
-                           :published_at, :snippet, :status)
+                           :published_at, :published_at_raw, :created_at,
+                           :snippet, :status, :section)
                    ON CONFLICT(id) DO UPDATE SET
                        feed_title = excluded.feed_title,
                        title = excluded.title,
                        url = excluded.url,
-                       published_at = excluded.published_at,
+                       -- Miniflux never changes published_at; without a
+                       -- created_at the cap would move with every fetch
+                       published_at = MIN(COALESCE(entries.published_at,
+                                                   excluded.published_at),
+                                          excluded.published_at),
+                       published_at_raw = excluded.published_at_raw,
+                       created_at = excluded.created_at,
                        snippet = excluded.snippet,
-                       status = excluded.status""",
-                [_entry_row(e) for e in entries],
+                       section = excluded.section,
+                       -- The user marked it read after this fetch: the
+                       -- fetched 'unread' is out of date
+                       status = CASE WHEN excluded.status = 'unread' AND EXISTS (
+                                         SELECT 1 FROM user_read u
+                                         WHERE u.entry_id = entries.id
+                                           AND u.read_at >= :fetched_at)
+                                     THEN 'read' ELSE excluded.status END""",
+                rows,
             )
 
-            previous = _story_lookup(conn, run_ids)
+            conn.execute("CREATE TEMP TABLE IF NOT EXISTS run_ids (id INTEGER PRIMARY KEY)")
+            conn.execute("DELETE FROM temp.run_ids")
+            conn.executemany("INSERT OR IGNORE INTO temp.run_ids (id) VALUES (?)",
+                             [(row['id'],) for row in rows])
+
+            if fetch is not None:
+                _prune_deleted(conn, fetch)
+
+            previous = _previous_stories(conn, min_sources)
 
             # Articles seen in this run get re-assigned from scratch
-            conn.executemany("DELETE FROM story_entries WHERE entry_id = ?",
-                             [(i,) for i in run_ids])
+            conn.execute("""DELETE FROM story_entries
+                            WHERE entry_id IN (SELECT id FROM temp.run_ids)""")
 
-            # Largest clusters pick their inherited story ID first
-            order = sorted(range(len(clusters)),
-                           key=lambda i: len(clusters[i].entry_ids), reverse=True)
-            claimed = set()
-            for idx in order:
-                cluster = clusters[idx]
-                story_id = _inherit_story_id(cluster.entry_ids, previous, claimed)
-                claimed.add(story_id)
-                assigned[idx] = story_id
-
+            assigned = _match_story_ids(clusters, previous, feed_of, min_sources)
+            for idx, cluster in enumerate(clusters):
+                story_id = assigned[idx]
                 conn.execute(
-                    """INSERT INTO stories (id, headline_entry_id, first_seen, last_seen)
-                       VALUES (?, ?, ?, ?)
+                    """INSERT INTO stories (id, headline_entry_id, first_seen, last_seen,
+                                            topic_key)
+                       VALUES (?, ?, ?, ?, ?)
                        ON CONFLICT(id) DO UPDATE SET
                            headline_entry_id = excluded.headline_entry_id,
-                           last_seen = excluded.last_seen""",
-                    (story_id, cluster.headline_entry_id, now, now),
+                           last_seen = excluded.last_seen,
+                           topic_key = excluded.topic_key""",
+                    (story_id,
+                     _sticky_headline(cluster, previous.get(story_id)) if sticky_headline
+                     else cluster.headline_entry_id,
+                     now, now, cluster.topic_key),
                 )
                 conn.executemany(
                     "INSERT INTO story_entries (entry_id, story_id, is_duplicate) "
@@ -149,20 +400,90 @@ class StoryStore:
             # Stories that lost all their articles are gone
             conn.execute("""DELETE FROM stories WHERE id NOT IN
                             (SELECT DISTINCT story_id FROM story_entries)""")
+            conn.execute("DROP TABLE temp.run_ids")
 
         return assigned
 
-    def mark_read(self, entry_ids: list) -> None:
-        """Record that entries were marked as read in Miniflux."""
+    def record_auto_marked(self, entry_ids: list) -> None:
+        """Record that aRSSe marked entries as read in Miniflux."""
+        marked_at = db_timestamp(datetime.now(timezone.utc))
         with self._connect() as conn:
             conn.executemany("UPDATE entries SET status = 'read' WHERE id = ?",
                              [(i,) for i in entry_ids])
+            conn.executemany("INSERT OR REPLACE INTO auto_marked (entry_id, marked_at) "
+                             "VALUES (?, ?)", [(i, marked_at) for i in entry_ids])
 
-    def cleanup(self, retention_days: int) -> None:
-        """Remove stories and articles older than the retention period."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+    def mark_read(self, entry_ids: list) -> None:
+        """
+        Record that the user marked entries read in Miniflux ('Story gelesen').
+
+        Kept in user_read, not auto_marked: those are duplicates aRSSe marked
+        itself, which rank last as canonical article and are never marked
+        again. Entries that are not stored are skipped.
+        """
+        read_at = db_timestamp(datetime.now(timezone.utc))
         with self._connect() as conn:
-            conn.execute("DELETE FROM stories WHERE last_seen < ?", (cutoff,))
+            conn.executemany("UPDATE entries SET status = 'read' WHERE id = ?",
+                             [(i,) for i in entry_ids])
+            conn.executemany("INSERT OR REPLACE INTO user_read (entry_id, read_at) "
+                             "SELECT id, ? FROM entries WHERE id = ?",
+                             [(read_at, i) for i in entry_ids])
+
+    def set_read(self, entry_ids: Iterable[int]) -> int:
+        """
+        Take over read marks made in Miniflux (status sync) for stored entries.
+
+        Returns:
+            Number of stored entries that were unread until now.
+        """
+        with self._connect() as conn:
+            return sum(conn.execute("UPDATE entries SET status = 'read' "
+                                    "WHERE id = ? AND status != 'read'", (i,)).rowcount
+                       for i in entry_ids)
+
+    def refresh_auto_marked(self, fetched_ids: list) -> None:
+        """
+        Keep the records of marked entries that the last fetch returned.
+
+        Sets marked_at to now for them, so cleanup counts from the last
+        fetch rather than from marking: Miniflux does not clamp dates, and
+        an entry dated days ahead stays in the lookback window until then.
+        """
+        now = db_timestamp(datetime.now(timezone.utc))
+        with self._connect() as conn:
+            marked = {row['entry_id'] for row in conn.execute("SELECT entry_id FROM auto_marked")}
+            conn.executemany("UPDATE auto_marked SET marked_at = ? WHERE entry_id = ?",
+                             [(now, i) for i in marked.intersection(fetched_ids)])
+
+    def auto_marked_ids(self) -> set:
+        """IDs of entries that aRSSe marked as read before; they are never marked again."""
+        with self._connect() as conn:
+            return {row['entry_id'] for row in conn.execute("SELECT entry_id FROM auto_marked")}
+
+    def cleanup(self, retention_days: int, lookback_hours: int = 24) -> None:
+        """
+        Remove articles and stories older than the retention period.
+
+        Retention applies per article: a story that keeps running for weeks
+        loses its old articles, and only then the story itself. Records of
+        entries marked read are kept for lookback_hours plus a day after
+        the last fetch that returned the entry (see refresh_auto_marked).
+        The window only moves forward, so such an entry is not fetched
+        again; the extra day is a margin, e.g. for runs cut off at
+        max_entries.
+        """
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=retention_days)
+        marked_cutoff = now - timedelta(hours=lookback_hours + 24)
+        with self._connect() as conn:
+            conn.execute("DELETE FROM auto_marked WHERE marked_at < ?",
+                         (db_timestamp(marked_cutoff),))
+            conn.execute("""DELETE FROM story_entries WHERE entry_id IN
+                            (SELECT id FROM entries WHERE published_at < ?)""",
+                         (db_timestamp(cutoff),))
+            conn.execute("DELETE FROM stories WHERE last_seen < ?", (cutoff.isoformat(),))
+            conn.execute("""DELETE FROM stories WHERE id NOT IN
+                            (SELECT DISTINCT story_id FROM story_entries)""")
             conn.execute("""DELETE FROM entries
                             WHERE id NOT IN (SELECT entry_id FROM story_entries)""")
 
@@ -176,45 +497,222 @@ class StoryStore:
             row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return json.loads(row['value']) if row else default
 
-    def top_stories(self, max_age_hours: int, limit: int) -> list:
+    def last_error(self):
+        """
+        Why the last clustering run failed, or None.
+
+        Meta 'last_error', unless storing the latest error failed: then the
+        error kept in memory, which is newer (see news_clustering.record_error).
+        """
+        if self.unsaved_error is not None:
+            return self.unsaved_error
+        return self.get_meta('last_error')
+
+    def top_stories(self, max_age_hours: int, limit: int, min_sources: int = 1,
+                    earlier_max: int = EARLIER_ARTICLES_MAX,
+                    exclude_patterns: Iterable[str] = (), section: Optional[str] = None,
+                    hide_read: bool = False) -> list:
         """
         Return ranked stories with their articles.
 
-        Ranking favours stories covered by many distinct sources and
-        decays with the age of the newest article.
+        Only articles of the last max_age_hours count: a story needs
+        min_sources feeds among them, and ranking favours stories covered
+        by many distinct sources and decays with the age of the newest
+        article. Older articles are listed in 'earlier_articles'.
+        Stories whose articles all have a title matching one of
+        exclude_patterns (regular expressions, case-insensitive; e.g. the
+        weather report) are left out. With section, only stories of that
+        section are returned; with hide_read, only stories with an unread
+        article in the window.
         """
-        since = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
-        with self._connect() as conn:
-            story_rows = conn.execute(
-                "SELECT * FROM stories WHERE last_seen >= ?", (since,)
-            ).fetchall()
-            stories = [self._load_story(conn, row) for row in story_rows]
+        stories = self._ranked(max_age_hours, min_sources, earlier_max, exclude_patterns)
+        return [s for s in stories
+                if (not hide_read or s['unread_count'])
+                and (section is None or s['section'] == section)][:limit]
 
+    def front_page(self, max_age_hours: int, limit: int, offset: int, page_size: int,
+                   min_sources: int = 1, earlier_max: int = EARLIER_ARTICLES_MAX,
+                   exclude_patterns: Iterable[str] = (), section: Optional[str] = None,
+                   hide_read: bool = False) -> FrontPage:
+        """
+        One page of the front page: ranked stories grouped by topic.
+
+        Every topic takes one slot (group_topics), and pages, total and
+        limit count these slots. Read stories (hide_read) are left out
+        before grouping, so the best unread story of a topic leads it.
+        The section counts cover all sections, each as the front page of
+        that section would count it.
+        """
+        ranked = self._ranked(max_age_hours, min_sources, earlier_max, exclude_patterns)
+        shown = [s for s in ranked if not hide_read or s['unread_count']]
+        counts = Counter()
+        for name in {s['section'] for s in shown if s['section']}:
+            counts[name] = min(len(group_topics([s for s in shown if s['section'] == name])),
+                               limit)
+        def in_section(story):
+            return section is None or story['section'] == section
+
+        groups = group_topics([s for s in shown if in_section(s)])[:limit]
+        # What ?alle=1 adds to this page: slots of the same section, counted
+        # like total, so the link never leads to a page with nothing new
+        hidden = 0
+        if hide_read:
+            hidden = len(group_topics([s for s in ranked if in_section(s)])[:limit]) \
+                - len(groups)
+        return FrontPage(
+            stories=groups[offset:offset + page_size],
+            total=len(groups),
+            sections=sorted(counts.items(), key=lambda item: (-item[1], item[0])),
+            hidden_read=hidden,
+        )
+
+    def related_stories(self, story: dict, max_age_hours: int, min_sources: int = 1,
+                        earlier_max: int = EARLIER_ARTICLES_MAX,
+                        exclude_patterns: Iterable[str] = ()) -> list:
+        """The other ranked stories of story's topic, best first."""
+        if story.get('topic_key') is None:
+            return []
+        return [s for s in self._ranked(max_age_hours, min_sources, earlier_max,
+                                        exclude_patterns)
+                if s['topic_key'] == story['topic_key'] and s['id'] != story['id']]
+
+    def search(self, query: str, max_age_hours: int, limit: int, min_sources: int = 1,
+               exclude_patterns: Iterable[str] = ()) -> list:
+        """
+        Stories with an article whose title or snippet contains query.
+
+        Covers every stored article (storage.retention_days), not only the
+        window: all of a story's articles count here, ranked like
+        top_stories. Case-insensitive, also for umlauts; % and _ match
+        themselves. Each story lists the matching articles in 'matches'
+        and is 'current' while it has an article in the window, which
+        articles mark with 'in_window'.
+        """
+        query = query.strip()[:MAX_QUERY_CHARS]
+        if not query:
+            return []
+        pattern = '%' + re.sub(r'([\\%_])', r'\\\1', query.casefold()) + '%'
         now = datetime.now(timezone.utc)
+        cut = db_timestamp(now - timedelta(hours=max_age_hours))
+        with self._connect() as conn:
+            conn.create_function('arsse_fold', 1, _fold, deterministic=True)
+            conn.execute("BEGIN")
+            matched = defaultdict(set)
+            for row in conn.execute(
+                    r"""SELECT se.story_id, e.id FROM entries e
+                        JOIN story_entries se ON se.entry_id = e.id
+                        WHERE arsse_fold(e.title) LIKE :p ESCAPE '\'
+                           OR arsse_fold(e.snippet) LIKE :p ESCAPE '\'""",
+                    {'p': pattern}):
+                matched[row['story_id']].add(row['id'])
+            stories = []
+            for story_id, ids in matched.items():
+                row = conn.execute("SELECT * FROM stories WHERE id = ?", (story_id,)).fetchone()
+                if row is None:
+                    continue
+                story = self._load_story(conn, row, datetime.min.replace(tzinfo=timezone.utc),
+                                         0)
+                for article in story['articles']:
+                    article['in_window'] = (article['published_at'] or '') >= cut
+                story['matches'] = [a for a in story['articles'] if a['id'] in ids]
+                story['current'] = any(a['in_window'] for a in story['articles'])
+                stories.append(story)
+
+        stories = self._rank(stories, now, max_age_hours, min_sources, exclude_patterns)
+        return stories[:limit]
+
+    def _ranked(self, max_age_hours: int, min_sources: int, earlier_max: int,
+                exclude_patterns: Iterable[str]) -> list:
+        """All stories of the window that may be shown, best first (see top_stories)."""
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(hours=max_age_hours)
+        with self._connect() as conn:
+            # One read snapshot: a run committing in between must not show
+            # an article under two stories
+            conn.execute("BEGIN")
+            story_rows = conn.execute(
+                "SELECT * FROM stories WHERE last_seen >= ?", (since.isoformat(),)
+            ).fetchall()
+            stories = [self._load_story(conn, row, since, earlier_max) for row in story_rows]
+        return self._rank(stories, now, max_age_hours, min_sources, exclude_patterns)
+
+    @staticmethod
+    def _rank(stories: list, now: datetime, max_age_hours: int, min_sources: int,
+              exclude_patterns: Iterable[str]) -> list:
+        """Drop stories that are not shown, score the others and sort them best first."""
+        excluded = [re.compile(p, re.IGNORECASE) for p in exclude_patterns]
+        stories = [s for s in stories
+                   if s['articles'] and s['source_count'] >= min_sources
+                   and not (excluded and all(_matches_any(a['title'], excluded)
+                                             for a in s['articles']))]
         for story in stories:
-            newest = parse_date(story['articles'][0]['published_at']) if story['articles'] else None
+            newest = parse_date(story['articles'][0]['published_at'])
             age_hours = (now - newest).total_seconds() / 3600 if newest else max_age_hours
             story['score'] = story['source_count'] / (1 + max(age_hours, 0) / 12)
 
         stories.sort(key=lambda s: s['score'], reverse=True)
-        return stories[:limit]
+        return stories
 
-    def get_story(self, story_id: str) -> Optional[dict]:
+    def top_stories_page(self, max_age_hours: int, limit: int, offset: int, page_size: int,
+                         min_sources: int = 1, earlier_max: int = EARLIER_ARTICLES_MAX,
+                         exclude_patterns: Iterable[str] = (), section: Optional[str] = None,
+                         hide_read: bool = False) -> tuple:
+        """
+        Return (stories, total): one page of the front page (see front_page).
+
+        total counts all topic groups up to limit, so the pages cover
+        exactly what the front page lists; stories holds at most page_size
+        of them, starting at offset.
+        """
+        page = self.front_page(max_age_hours, limit, offset, page_size, min_sources,
+                               earlier_max, exclude_patterns, section, hide_read)
+        return page.stories, page.total
+
+    def get_story(self, story_id: str, max_age_hours: int,
+                  earlier_max: int = EARLIER_ARTICLES_MAX) -> Optional[dict]:
+        """
+        Return one story, or None if it does not exist (any more).
+
+        Like top_stories, only articles of the last max_age_hours count;
+        a story without any is over and not found.
+        """
+        since = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
         with self._connect() as conn:
+            conn.execute("BEGIN")  # story row and articles from one snapshot
             row = conn.execute("SELECT * FROM stories WHERE id = ?", (story_id,)).fetchone()
-            return self._load_story(conn, row) if row else None
+            story = self._load_story(conn, row, since, earlier_max) if row else None
+        return story if story and story['articles'] else None
 
     @staticmethod
-    def _load_story(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
-        articles = [dict(a) for a in conn.execute(
-            """SELECT e.*, se.is_duplicate FROM story_entries se
+    def _load_story(conn: sqlite3.Connection, row: sqlite3.Row, since: datetime,
+                    earlier_max: int) -> dict:
+        """
+        Load a story; counts cover only articles published since 'since'.
+
+        Older articles that are still attached go to 'earlier_articles'
+        (newest first, at most earlier_max). Nothing checks whether they
+        still exist in Miniflux (see _prune_deleted).
+        """
+        all_articles = [dict(a) for a in conn.execute(
+            """SELECT e.*, se.is_duplicate, u.entry_id IS NOT NULL AS user_read
+               FROM story_entries se
                JOIN entries e ON e.id = se.entry_id
+               LEFT JOIN user_read u ON u.entry_id = e.id
                WHERE se.story_id = ?
-               ORDER BY e.published_at DESC""",
+               ORDER BY e.published_at DESC, e.id DESC""",
             (row['id'],),
         ).fetchall()]
-        headline = next((a for a in articles if a['id'] == row['headline_entry_id']),
-                        articles[0] if articles else None)
+        cut = db_timestamp(since)
+        articles = [a for a in all_articles if (a['published_at'] or '') >= cut]
+        earlier = [a for a in all_articles if (a['published_at'] or '') < cut]
+        # The stored headline may have left the window: the newest article
+        # stands in, but not a duplicate that aRSSe marked read in Miniflux
+        headline = next((a for a in articles if a['id'] == row['headline_entry_id']), None) \
+            or next((a for a in articles if not a['is_duplicate']),
+                    articles[0] if articles else None)
+        unread = sum(1 for a in articles if a['status'] == 'unread')
+        # Majority of the articles' sections; a tie goes to the newest article
+        sections = Counter(a['section'] for a in articles if a['section'])
         return {
             'id': row['id'],
             'first_seen': row['first_seen'],
@@ -222,49 +720,273 @@ class StoryStore:
             'headline': headline,
             'articles': articles,
             'article_count': len(articles),
-            'source_count': len({a['feed_title'] for a in articles}),
+            'source_count': len({_feed_key(a) for a in articles}),
+            'earlier_articles': earlier[:max(earlier_max, 0)],
+            'earlier_count': len(earlier),
+            'duplicate_count': sum(1 for a in articles if a['is_duplicate']),
+            'unread_count': unread,
+            # Unread articles of a story the user marked read ('N neu')
+            'new_count': unread if any(a['user_read'] for a in articles) else 0,
+            'section': sections.most_common(1)[0][0] if sections else None,
+            'topic_key': row['topic_key'],
         }
 
 
-def _entry_row(entry: dict) -> dict:
+def group_topics(stories: list) -> list:
+    """
+    Keep the first (best-ranked) story of every topic, in order.
+
+    Returns copies of these stories with the other stories of their topic
+    in 'related', in order; the input is left alone. A story without
+    topic_key is a topic of its own.
+    """
+    leads = {}
+    for story in stories:
+        key = ('topic', story['topic_key']) if story.get('topic_key') is not None \
+            else ('story', story['id'])
+        if key in leads:
+            leads[key]['related'].append(story)
+        else:
+            leads[key] = dict(story, related=[])
+    return list(leads.values())
+
+
+def select_coverage(story: dict, n: int) -> list:
+    """
+    Pick up to n articles to list under a story's headline.
+
+    Every other source gets one slot first (its newest article, newest
+    sources first); the headline's own feed and further articles of the
+    same feeds only fill the remaining slots. Duplicates are left out:
+    they repeat an article that is already listed.
+    """
+    headline = story.get('headline') or {}
+    candidates = [a for a in story['articles']
+                  if a['id'] != headline.get('id') and not a['is_duplicate']]
+    seen = {_feed_key(headline)} if headline else set()
+    first, rest = [], []
+    for article in candidates:  # newest first
+        key = _feed_key(article)
+        if key in seen:
+            rest.append(article)
+        else:
+            seen.add(key)
+            first.append(article)
+    return (first + rest)[:max(n, 0)]
+
+
+def _entry_row(entry: dict, fetched_at: datetime) -> dict:
+    """
+    Turn a Miniflux entry into a row of the entries table.
+
+    Feeds may date articles in the future (wrong time zone, scheduled
+    items). Such an article would never age and pin its story to the top,
+    so published_at is capped at the time Miniflux ingested the entry
+    (created_at) and at the fetch time; the feed's date is kept in
+    published_at_raw.
+    """
     feed = entry.get('feed') or {}
+    raw = entry.get('published_at')
+    created = parse_date(entry.get('created_at'))
+    dates = [d for d in (parse_date(raw), created, fetched_at) if d]
     return {
         'id': entry['id'],
         'feed_id': entry.get('feed_id') or feed.get('id'),
-        'feed_title': feed.get('title', ''),
-        'title': entry.get('title', ''),
-        'url': entry.get('url', ''),
-        'published_at': _normalize_date(entry.get('published_at')),
+        'feed_title': feed.get('title') or '',
+        'title': (entry.get('title') or '')[:MAX_TITLE_CHARS],
+        'url': entry.get('url') or '',
+        'published_at': db_timestamp(min(dates)),
+        'published_at_raw': raw if isinstance(raw, str) else None,
+        'created_at': db_timestamp(created) if created else None,
         'snippet': entry.get('_snippet', ''),
         'status': entry.get('status', 'unread'),
+        'section': entry.get('_section'),
+        'fetched_at': db_timestamp(fetched_at),
     }
 
 
-def _story_lookup(conn: sqlite3.Connection, entry_ids: list) -> dict:
-    """Map entry ID to its current story ID."""
-    lookup = {}
-    for chunk_start in range(0, len(entry_ids), 500):
-        chunk = entry_ids[chunk_start:chunk_start + 500]
-        placeholders = ','.join('?' * len(chunk))
-        for row in conn.execute(
-                f"SELECT entry_id, story_id FROM story_entries "
-                f"WHERE entry_id IN ({placeholders})", chunk):
-            lookup[row['entry_id']] = row['story_id']
-    return lookup
+def _fold(value) -> str:
+    """Case-fold for search: SQLite's LIKE only ignores the case of ASCII letters."""
+    return value.casefold() if isinstance(value, str) else ''
 
 
-def _inherit_story_id(entry_ids: list, previous: dict, claimed: set) -> str:
-    """Pick the previous story sharing most articles, or mint a new ID."""
-    votes = Counter(previous[e] for e in entry_ids if e in previous)
-    for story_id, _ in votes.most_common():
-        if story_id not in claimed:
-            return story_id
-    return uuid.uuid4().hex[:12]
+def _feed_key(article) -> object:
+    """Identify an article's source by feed ID: two subscriptions may share a title."""
+    return article['feed_id'] or article['feed_title']
 
 
-def _normalize_date(value: Optional[str]) -> Optional[str]:
-    parsed = parse_date(value)
-    return parsed.isoformat() if parsed else None
+def _prune_deleted(conn: sqlite3.Connection, fetch: FetchResult) -> int:
+    """
+    Remove stored articles that no longer exist in Miniflux.
+
+    Flush history, archiving and removed feeds delete entries in Miniflux;
+    their links would return 404. The stored published_at is at most the
+    date Miniflux filters on, so an article dated after the fetch cutoff
+    that is missing from the run must have been returned if it still
+    existed. A truncated fetch only holds the newest IDs, so there only
+    IDs from min_id on are checked. Older articles cannot be checked and
+    stay until retention; the story page therefore links them to the
+    publisher, not to Miniflux. Expects the run's IDs in temp.run_ids.
+
+    Returns:
+        Number of articles removed.
+    """
+    condition = "published_at > :after AND id NOT IN (SELECT id FROM temp.run_ids)"
+    if not fetch.complete:
+        if fetch.min_id is None:
+            return 0
+        condition += " AND id >= :min_id"
+    params = {'after': db_timestamp(fetch.cutoff + PRUNE_MARGIN), 'min_id': fetch.min_id}
+    conn.execute(f"""DELETE FROM story_entries WHERE entry_id IN
+                     (SELECT id FROM entries WHERE {condition})""", params)
+    removed = conn.execute(f"DELETE FROM entries WHERE {condition}", params).rowcount
+    if removed:
+        logger.info("Removed %d articles that no longer exist in Miniflux", removed)
+    return removed
+
+
+@dataclass
+class _PreviousStory:
+    """A stored story as far as this run's articles are concerned."""
+    entry_ids: set = field(default_factory=set)
+    headline_entry_id: Optional[int] = None
+    feeds: set = field(default_factory=set)
+    visible: bool = False
+
+
+def _previous_stories(conn: sqlite3.Connection, min_sources: int) -> dict:
+    """
+    Map story ID to the stored stories holding articles of this run.
+
+    Only the run's articles (temp.run_ids) are loaded: they are the ones a
+    cluster can share, and they decide whether the story was visible
+    (at least min_sources feeds inside the window).
+    """
+    previous = defaultdict(_PreviousStory)
+    for row in conn.execute(
+            """SELECT se.story_id, se.entry_id, s.headline_entry_id,
+                      e.feed_id, e.feed_title
+               FROM story_entries se
+               JOIN temp.run_ids r ON r.id = se.entry_id
+               JOIN stories s ON s.id = se.story_id
+               JOIN entries e ON e.id = se.entry_id"""):
+        story = previous[row['story_id']]
+        story.entry_ids.add(row['entry_id'])
+        story.headline_entry_id = row['headline_entry_id']
+        story.feeds.add(_feed_key(row))
+    for story in previous.values():
+        story.visible = len(story.feeds) >= min_sources
+    return dict(previous)
+
+
+def _sticky_headline(cluster: ClusterResult, story: Optional[_PreviousStory]) -> int:
+    """
+    The headline to store for cluster; story is the stored story it continues.
+
+    The previous headline stays while it is still a member that may head
+    the story (not in noise_ids) and is not a duplicate (those may be
+    marked read). A headline that changes with every longer article
+    forces a full redraw on E-Ink and makes the story look new. Only for
+    canonical_strategy 'longest': 'newest' and 'source_priority' ask for
+    the newest report or the best source on top, which a sticky headline
+    would never let through.
+    """
+    old = story.headline_entry_id if story else None
+    if (old is not None and old != cluster.headline_entry_id
+            and old in cluster.entry_ids
+            and old not in cluster.noise_ids
+            and old not in cluster.duplicate_ids):
+        return old
+    return cluster.headline_entry_id
+
+
+def _matches_any(title: Optional[str], patterns: list) -> bool:
+    return any(pattern.search(title or '') for pattern in patterns)
+
+
+def _match_story_ids(clusters: list, previous: dict, feed_of: dict,
+                     min_sources: int) -> dict:
+    """
+    Decide which cluster continues which stored story.
+
+    Every pair of cluster and previous story that share articles is
+    ranked, and pairs are taken greedily, best first, while neither side
+    is taken yet. A pair ranks higher, in this order, if:
+
+    1. both the story and the cluster are visible (min_sources feeds): an
+       ID the user has seen stays on the front page. Without this, a
+       hidden single-feed series absorbs a real story whenever the two
+       merge for one run, and keeps its ID when they split again;
+    2. among such pairs, they share more articles: the real continuation
+       keeps the ID, not a side topic that took one article along;
+    3. the story was visible and the cluster holds its headline article.
+       If no visible cluster continues it, the ID stays with the title
+       the user saw rather than going to a larger hidden series, even
+       when the event itself is down to one feed for a run;
+    4. they share more articles, then the cluster holds the headline
+       (so on an even split the ID follows the title the user saw);
+    5. the cluster is visible, then larger, then earlier in the list.
+
+    Clusters left without a story get a new ID.
+
+    Returns:
+        Mapping of cluster index to story ID.
+    """
+    story_of = {eid: sid for sid, story in previous.items() for eid in story.entry_ids}
+    candidates = []
+    for idx, cluster in enumerate(clusters):
+        members = set(cluster.entry_ids)
+        # An article missing from entries counts as a source of its own
+        visible = len({feed_of.get(eid, eid) for eid in members}) >= min_sources
+        votes = Counter(story_of[eid] for eid in members if eid in story_of)
+        for story_id, overlap in votes.items():
+            story = previous[story_id]
+            both = story.visible and visible
+            has_headline = story.headline_entry_id in members
+            key = (both, overlap if both else 0, story.visible and has_headline,
+                   overlap, has_headline, visible, len(members), -idx)
+            candidates.append((key, story_id, idx))
+    candidates.sort(reverse=True)
+
+    assigned = {}
+    taken = set()
+    for _, story_id, idx in candidates:
+        if idx not in assigned and story_id not in taken:
+            assigned[idx] = story_id
+            taken.add(story_id)
+    for idx in range(len(clusters)):
+        if idx not in assigned:
+            assigned[idx] = uuid.uuid4().hex[:12]
+    return assigned
+
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                        (name,)).fetchone() is not None
+
+
+def _statements(script: str) -> Iterator[str]:
+    """Split an SQL script into single statements (execute() takes only one)."""
+    statement = ''
+    for part in script.split(';'):
+        statement += part + ';'
+        # A ';' inside a string literal or comment does not end the statement
+        if sqlite3.complete_statement(statement):
+            if statement.strip(' \t\n;'):
+                yield statement
+            statement = ''
+    if statement.strip(' \t\n;'):
+        yield statement  # incomplete: let SQLite report the syntax error
+
+
+def db_timestamp(value: datetime) -> str:
+    """
+    Format a date the way the entries table stores it.
+
+    Always UTC, whole seconds and '+00:00' (e.g. 2026-09-24T08:15:00+00:00),
+    so dates can be compared as strings in SQL.
+    """
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def parse_date(value: Optional[str]) -> Optional[datetime]:

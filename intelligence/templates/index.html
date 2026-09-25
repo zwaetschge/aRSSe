@@ -1,38 +1,77 @@
 {% extends "base.html" %}
+{% macro pager(position) %}
+{% if prev_url or next_url %}
+<nav class="pager {{ position }}" aria-label="Seiten">
+  {% if prev_url %}<a href="{{ prev_url }}" rel="prev"><span aria-hidden="true">←</span> Zurück</a>{% else %}<span></span>{% endif %}
+  {% if next_url %}<a href="{{ next_url }}" rel="next">Weiter <span aria-hidden="true">→</span></a>{% endif %}
+</nav>
+{% endif %}
+{% endmacro %}
+{% block title %}{{ section or 'Top Stories' }}{% if page > 1 %} – Seite {{ page }}{% endif %}{% endblock %}
 {% block content %}
+{% if sections %}
+<nav class="sections" aria-label="Rubriken">
+  {% if section is none %}<span aria-current="page">Alle</span>{% else %}<a href="{{ section_url(none) }}">Alle</a>{% endif %}
+  {% for name, count in sections %}
+  {% if name == section %}<span aria-current="page">{{ name }} ({{ count }})</span>{% else %}<a href="{{ section_url(name) }}">{{ name }} ({{ count }})</a>{% endif %}
+  {% endfor %}
+</nav>
+{% endif %}
 <p class="status">
-  {% if last_success %}Aktualisiert {{ last_success | ago }}{% else %}Noch kein Clustering-Lauf abgeschlossen{% endif %}
-  · {{ stories | length }} Stories
+  {%- if last_success %}Stand {{ last_success | clock }}{% else %}Noch kein Clustering-Lauf abgeschlossen{% endif %}
+  {%- if last_error %} · <strong class="error">Fehler seit {{ last_error.at | clock }}: {{ last_error.message }}</strong>{% endif %}
+  {%- if pages > 1 %} · Seite {{ page }} von {{ pages }}{% endif %}
+  {{- ' ·' }} {{ total }} {{ 'Story' if total == 1 else 'Stories' -}}
+  {%- if show_read %} · <a href="{{ read_toggle_url }}">Gelesene ausblenden</a>
+  {%- elif hidden_read %} · <a href="{{ read_toggle_url }}">{{ hidden_read }} gelesene zeigen</a>{% endif %}
 </p>
+{{ pager('top') }}
 
 {% for story in stories %}
 {% set head = story.headline %}
 <article class="story">
-  <h2><a href="{{ entry_link(head) }}">{{ head.title }}</a></h2>
+  <h2><a href="{{ entry_link(head) }}">{{ display_title(head) }}</a></h2>
   <div class="meta">
-    <span class="source">{{ head.feed_title }}</span> · {{ head.published_at | ago }}
+    <span class="source">{{ head.feed_title }}</span> · {{ head.published_at | clock }}
     · {{ story.source_count }} Quellen, {{ story.article_count }} Artikel
+    {%- if story.duplicate_count %} · +{{ story.duplicate_count }} gleichlautende {{ 'Meldung' if story.duplicate_count == 1 else 'Meldungen' }}{% endif %}
+    {%- if story.new_count %} · <span class="new">{{ story.new_count }} neu</span>{% elif not story.unread_count %} · gelesen{% endif %}
   </div>
   {% if head.snippet %}<p class="snippet">{{ head.snippet }}</p>{% endif %}
 
-  {% set others = story.articles | rejectattr('id', 'equalto', head.id) | list %}
-  {% if others %}
+  {% set coverage = select_coverage(story, per_story) %}
+  {% if coverage %}
   <ul class="coverage">
-    {% for a in others[:per_story] %}
-    <li class="{{ 'duplicate' if a.is_duplicate }}">
-      <span class="source">{{ a.feed_title }}</span>:
-      <a href="{{ entry_link(a) }}">{{ a.title }}</a>
-      <span class="meta">{{ a.published_at | ago }}</span>
-      {% if a.is_duplicate %}<span class="label">Duplikat</span>{% endif %}
-    </li>
+    {% for a in coverage %}
+    <li><a href="{{ entry_link(a) }}"><b>{{ a.feed_title }}:</b> {{ display_title(a, false) }} {{ a.published_at | clock }}</a></li>
     {% endfor %}
   </ul>
-  {% if others | length > per_story %}
-  <a class="more" href="/story/{{ story.id }}">Alle {{ story.article_count }} Artikel →</a>
   {% endif %}
+  {% if story.related %}
+  <ul class="coverage related">
+    {% for r in story.related[:related_max] %}
+    <li><a href="{{ nav('/story/' ~ r.id) }}"><b>Mehr zum Thema:</b> {{ display_title(r.headline) }} ({{ r.source_count }} Quellen)</a></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if story.article_count > coverage | length + 1 or story.earlier_count or story.related | length > related_max %}
+  <a class="more" href="{{ nav('/story/' ~ story.id) }}">Alle {{ story.article_count }} Artikel
+    {%- if story.earlier_count %} · {{ story.earlier_count }} frühere{% endif %}
+    {%- if story.related | length > related_max %} · {{ story.related | length }} verwandte{% endif %} <span aria-hidden="true">→</span></a>
+  {% endif %}
+  {% if can_mark_read and story.unread_count %}
+  {# next defaults to the front page, so it is left out there #}
+  <form method="post" action="/story/{{ story.id }}/gelesen">{% if here() != '/' %}<input type="hidden" name="next" value="{{ here() }}">{% endif %}<button>Story gelesen ({{ story.unread_count }})</button></form>
   {% endif %}
 </article>
 {% else %}
+{% if section is not none %}
+<p class="empty">Keine Stories in der Rubrik „{{ section }}“.</p>
+{% elif hidden_read %}
+<p class="empty">Alles gelesen. Neue Stories erscheinen hier, sobald mehrere Quellen berichten.</p>
+{% else %}
 <p class="empty">Noch keine Stories. Sobald mehrere Quellen über dasselbe Thema berichten, erscheinen sie hier.</p>
+{% endif %}
 {% endfor %}
+{{ pager('bottom') }}
 {% endblock %}

@@ -1,39 +1,45 @@
 <?xml version="1.0"?>
 <Container version="2">
-  <Name>aRSSe-Miniflux</Name>
+  <Name>arsse-miniflux</Name>
   <Repository>miniflux/miniflux:2.3.3</Repository>
   <Registry>https://hub.docker.com/r/miniflux/miniflux</Registry>
-  <Network>bridge</Network>
+  <Network>arsse</Network>
   <MyIP/>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/miniflux/v2/discussions</Support>
-  <Project>https://miniflux.app/</Project>
+  <Support>https://github.com/zwaetschge/aRSSe/issues</Support>
+  <Project>https://github.com/zwaetschge/aRSSe</Project>
   <Overview>
-    aRSSe - Autonomer RSS-basierter News-Aggregator
+    aRSSe - Autonomer RSS-basierter News-Aggregator: Miniflux (dieser Container)
+    sammelt die Feeds, der Intelligence Layer (Template arsse-intelligence)
+    fasst sie zu Top Stories für E-Ink-Reader zusammen.
 
-    Ein selbstgehosteter Nachrichten-Aggregator, der die Kernfunktionalität
-    von Google News repliziert. Optimiert für E-Ink-Displays und
-    Mobile-First-Paradigmen.
+    Vor der Installation einmalig im Unraid-Terminal:
+      docker network create arsse
+    und unter Settings > Docker (erweiterte Ansicht) "Preserve user defined
+    networks" auf Yes stellen: Sonst löscht Unraid das Netzwerk beim nächsten
+    Neustart von Docker, und die Container starten nicht mehr.
+    Alle drei Container (arsse-db, arsse-miniflux, arsse-intelligence) kommen
+    in dieses Netzwerk und erreichen sich dort über ihre Namen. Im Standard-
+    Netzwerk "bridge" gibt es keine Namensauflösung zwischen Containern.
 
-    Komponenten:
-    - Miniflux: Minimalistischer RSS-Reader (Go-basiert)
-    - PostgreSQL: Datenspeicher (separater Container erforderlich)
-    - Intelligence Layer: Python-basiertes Clustering (optional)
-
-    Erfordert einen separaten PostgreSQL-Container!
+    Benötigt zuerst einen PostgreSQL-Container (Docker Hub: postgres:15-alpine)
+    mit dem Namen arsse-db im Netzwerk arsse, den Variablen POSTGRES_USER=miniflux,
+    POSTGRES_PASSWORD und POSTGRES_DB=miniflux sowie dem Pfad
+    /mnt/user/appdata/arsse/postgresql -> /var/lib/postgresql/data.
+    Anleitung: README, Abschnitt "Unraid ohne Compose".
   </Overview>
   <Category>MediaApp:Other Tools:</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
-  <TemplateURL>https://github.com/zwaetschge/aRSSe</TemplateURL>
+  <TemplateURL>https://raw.githubusercontent.com/zwaetschge/aRSSe/HEAD/unraid/miniflux.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/miniflux/logo/master/icon.svg</Icon>
-  <ExtraParams/>
+  <ExtraParams>--read-only --cap-drop=ALL --security-opt=no-new-privileges:true</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <DateInstalled></DateInstalled>
   <DonateText>Support Miniflux Development</DonateText>
   <DonateLink>https://github.com/sponsors/fguillot</DonateLink>
-  <Requires>PostgreSQL Container (z.B. postgres:15-alpine)</Requires>
+  <Requires>Netzwerk "arsse" (docker network create arsse; Settings &gt; Docker: "Preserve user defined networks" auf Yes) und ein PostgreSQL-Container namens arsse-db in diesem Netzwerk (README, "Unraid ohne Compose")</Requires>
 
   <!-- Port Configuration -->
   <Config
@@ -51,13 +57,13 @@
   <Config
     Name="Database URL"
     Target="DATABASE_URL"
-    Default="postgres://miniflux:password@postgres/miniflux?sslmode=disable"
+    Default="postgres://miniflux:CHANGE_ME@arsse-db/miniflux?sslmode=disable"
     Mode=""
-    Description="PostgreSQL Verbindungs-URL. Format: postgres://user:password@host/database"
+    Description="PostgreSQL-Verbindung: postgres://BENUTZER:PASSWORT@CONTAINERNAME/miniflux?sslmode=disable. CHANGE_ME durch POSTGRES_PASSWORD des Postgres-Containers ersetzen; arsse-db ist dessen Name im Netzwerk arsse."
     Type="Variable"
     Display="always"
     Required="true"
-    Mask="false">postgres://miniflux:password@postgres/miniflux?sslmode=disable</Config>
+    Mask="true">postgres://miniflux:CHANGE_ME@arsse-db/miniflux?sslmode=disable</Config>
 
   <!-- Admin Configuration -->
   <Config
@@ -98,7 +104,7 @@
     Target="ADMIN_PASSWORD"
     Default=""
     Mode=""
-    Description="Passwort für den Admin-Account (ÄNDERN!)"
+    Description="Passwort für den Admin-Account (nur beim ersten Start gelesen)"
     Type="Variable"
     Display="always"
     Required="true"
@@ -110,7 +116,7 @@
     Target="POLLING_FREQUENCY"
     Default="15"
     Mode=""
-    Description="Feed-Abrufintervall in Minuten. Niedrigere Werte = aktuellere News, aber mehr Last."
+    Description="Alle so viele Minuten wählt Miniflux bis zu BATCH_SIZE fällige Feeds zum Abruf aus. Wann ein Feed fällig ist, bestimmt der Polling Scheduler (entry_frequency: nach der Aktivität des Feeds, zwischen 5 Minuten und 24 Stunden). Kleiner = neue Artikel schneller, aber mehr Last."
     Type="Variable"
     Display="always"
     Required="false"
@@ -128,6 +134,17 @@
     Mask="false">entry_frequency</Config>
 
   <Config
+    Name="Batch Size"
+    Target="BATCH_SIZE"
+    Default="100"
+    Mode=""
+    Description="Höchstens so viele fällige Feeds pro Polling-Intervall"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">100</Config>
+
+  <Config
     Name="Worker Pool Size"
     Target="WORKER_POOL_SIZE"
     Default="5"
@@ -138,7 +155,41 @@
     Required="false"
     Mask="false">5</Config>
 
+  <!-- Content Processing -->
+  <Config
+    Name="YouTube Watch Time"
+    Target="FETCH_YOUTUBE_WATCH_TIME"
+    Default="1"
+    Mode=""
+    Description="Laufzeit von YouTube-Videos abrufen (1 = aktiviert)"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">1</Config>
+
+  <Config
+    Name="Odysee Watch Time"
+    Target="FETCH_ODYSEE_WATCH_TIME"
+    Default="1"
+    Mode=""
+    Description="Laufzeit von Odysee-Videos abrufen (1 = aktiviert)"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">1</Config>
+
   <!-- Cleanup Configuration -->
+  <Config
+    Name="Cleanup Frequency (Hours)"
+    Target="CLEANUP_FREQUENCY_HOURS"
+    Default="1"
+    Mode=""
+    Description="Alle so viele Stunden alte Artikel und Sitzungen aufräumen"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">1</Config>
+
   <Config
     Name="Cleanup Read Days"
     Target="CLEANUP_ARCHIVE_READ_DAYS"
@@ -161,29 +212,51 @@
     Required="false"
     Mask="false">30</Config>
 
+  <Config
+    Name="Cleanup Sessions Days"
+    Target="CLEANUP_REMOVE_SESSIONS_DAYS"
+    Default="30"
+    Mode=""
+    Description="Anmeldungen nach X Tagen ohne Nutzung beenden"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">30</Config>
+
   <!-- External Access -->
   <Config
     Name="Base URL"
     Target="BASE_URL"
     Default=""
     Mode=""
-    Description="Externe URL für PWA-Funktionalität (z.B. https://news.domain.com)"
+    Description="Adresse, unter der Ihre Geräte Miniflux erreichen, z.B. http://192.168.1.10:8080 oder https://news.meinedomain.de (nicht localhost: das wäre auf dem E-Ink-Reader das Gerät selbst)"
     Type="Variable"
     Display="always"
-    Required="false"
+    Required="true"
     Mask="false"></Config>
+
+  <Config
+    Name="Trusted Reverse Proxies"
+    Target="TRUSTED_REVERSE_PROXY_NETWORKS"
+    Default="127.0.0.1/32"
+    Mode=""
+    Description="Adresse(n) Ihres Reverse Proxys (CIDR, kommagetrennt). Nur von dort glaubt Miniflux X-Forwarded-Proto und setzt dann sichere Cookies. Nicht leer lassen (127.0.0.1/32 = kein Proxy)."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">127.0.0.1/32</Config>
 
   <!-- Metrics -->
   <Config
     Name="Enable Metrics"
     Target="METRICS_COLLECTOR"
-    Default="1"
+    Default="0"
     Mode=""
-    Description="Prometheus-Metriken aktivieren (1 = aktiviert)"
+    Description="Prometheus-Metriken unter /metrics (1 = aktiviert). Hinter einem Reverse Proxy nur mit METRICS_USERNAME und METRICS_PASSWORD aktivieren."
     Type="Variable"
     Display="advanced"
     Required="false"
-    Mask="false">1</Config>
+    Mask="false">0</Config>
 
   <Config
     Name="Metrics Networks"
@@ -195,4 +268,26 @@
     Display="advanced"
     Required="false"
     Mask="false">172.16.0.0/12</Config>
+
+  <Config
+    Name="Metrics Username"
+    Target="METRICS_USERNAME"
+    Default=""
+    Mode=""
+    Description="Benutzername für /metrics (HTTP Basic Auth). Nur zusammen mit dem Passwort setzen - leer = ohne Anmeldung."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false"></Config>
+
+  <Config
+    Name="Metrics Password"
+    Target="METRICS_PASSWORD"
+    Default=""
+    Mode=""
+    Description="Passwort für /metrics. Nur zusammen mit dem Benutzernamen setzen."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="true"></Config>
 </Container>

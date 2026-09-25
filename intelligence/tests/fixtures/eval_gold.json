@@ -1,0 +1,18 @@
+{
+ "description": "Synthetic labelled fixture for the unit tests (texts written for the tests). Articles 9 and 10 share only the rare word \"Razzia\" (cosine about 0.27). HAUSHALT and LEIPZIG_WAHL share the neutral topic POLITIK.",
+ "window": {"end": "2026-09-24T12:00:00Z", "hours": 24},
+ "articles": {
+  "https://example.org/tagesschau/1": {"event": "HAUSHALT", "topics": ["POLITIK"]},
+  "https://example.org/zeit/2": {"event": "HAUSHALT", "topics": ["POLITIK"]},
+  "https://example.org/spiegel/3": {"event": "PROZESSOR"},
+  "https://example.org/heise/4": {"event": "PROZESSOR"},
+  "https://example.org/tagesschau/5": {"event": "HOCHWASSER"},
+  "https://example.org/spiegel/6": {"event": "HOCHWASSER"},
+  "https://example.org/zeit/7": {"event": "STREIK"},
+  "https://example.org/heise/8": {"event": "STREIK"},
+  "https://example.org/tagesschau/9": {},
+  "https://example.org/heise/10": {},
+  "https://example.org/spiegel/11": {"event": "LEIPZIG_WAHL", "topics": ["POLITIK"]},
+  "https://example.org/zeit/12": {"event": "LEIPZIG_WAHL", "topics": ["POLITIK"]}
+ }
+}

@@ -4,6 +4,7 @@
 .env.*.local
 *.key
 *.pem
+secrets/
 
 # Data directories
 data/
@@ -77,3 +78,6 @@ docker-compose.override.yml
 # Test artifacts
 test-results/
 coverage/
+
+# Evaluation corpus: publisher texts (intelligence/eval/export_corpus.py)
+intelligence/eval/corpus*.json
