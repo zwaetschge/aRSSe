@@ -17,8 +17,8 @@
   {% if story.headline.snippet %}<p class="snippet">{{ story.headline.snippet }}</p>{% endif %}
 
   <nav class="views" aria-label="Ansicht">
-    {% if chronological %}<a href="/story/{{ story.id }}">Nach Aktualität</a><span aria-current="page">Chronologisch</span>
-    {%- else %}<span aria-current="page">Nach Aktualität</span><a href="/story/{{ story.id }}?ansicht=chronologisch">Chronologisch</a>{% endif %}
+    {% if chronological %}<a href="{{ nav('/story/' ~ story.id) }}">Nach Aktualität</a><span aria-current="page">Chronologisch</span>
+    {%- else %}<span aria-current="page">Nach Aktualität</span><a href="{{ nav('/story/' ~ story.id, ansicht='chronologisch') }}">Chronologisch</a>{% endif %}
   </nav>
 
   {% if chronological %}
@@ -63,5 +63,5 @@
   {% endif %}
   {% endif %}
 </article>
-<a class="more" href="/"><span aria-hidden="true">←</span> Zurück zu Top Stories</a>
+<a class="more" href="{{ nav('/') }}"><span aria-hidden="true">←</span> Zurück zu Top Stories</a>
 {% endblock %}

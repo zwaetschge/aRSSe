@@ -101,7 +101,7 @@ Die Miniflux-API kann keine Tags oder eigenen Metadaten schreiben – deshalb br
 | `/story/<id>` | Alle Artikel einer Story im Zeitfenster mit erster und letzter Meldung, gleichlautende Meldungen zusammengeklappt, darunter bis zu 20 ältere als „Frühere Berichte“ (mit Link auf das Original). `?ansicht=chronologisch` zeigt den Verlauf von der ersten Meldung an, nach Tagen gruppiert |
 | `/api/stories` | Dieselben Daten als JSON (alle Stories, ohne Seiten) |
 | `/healthz` | `200`, solange der letzte erfolgreiche Lauf weniger als drei Intervalle zurückliegt (immer ohne Anmeldung) |
-| `/static/…` | Manifest und Icons für den Startbildschirm (immer ohne Anmeldung, Browser holen sie ohne Zugangsdaten) |
+| `/static/…` | Manifest und Icons für den Startbildschirm (immer ohne Anmeldung, Icons holen Browser und Android teils ohne Zugangsdaten) |
 
 Die Seiten sind für E-Ink gebaut: kurze Seiten statt langem Scrollen, nur absolute Uhrzeiten („Stand 18:32“, „Mi 14:53“ – relative Angaben wie „vor 5 Min.“ stimmen auf einem stehenden Bildschirm bald nicht mehr), jede Quelle zuerst mit einem Artikel statt mehrerer aus demselben Feed, und Links, die als ganze Zeile mindestens 44 px hoch antippbar sind. Die Uhrzeiten gelten in der Zeitzone `TZ` aus `.env` (Standard Europe/Berlin) oder `web.timezone` in `config.yaml`.
 
@@ -204,7 +204,7 @@ Miniflux funktioniert als PWA. Auf E-Ink-Android-Geräten (z.B. Boox Palma):
 2. Wählen Sie "Zum Startbildschirm hinzufügen"
 3. Die App verhält sich dann wie eine native Anwendung
 
-Die Top Stories lassen sich genauso auf den Startbildschirm legen (eigenes Icon, Name „aRSSe“). Als eigenständige App ohne Adressleiste installiert Chrome sie nur über HTTPS (siehe [Reverse Proxy](#reverse-proxy-https)); unter `http://tower:8081` entsteht eine Verknüpfung, die im Browser öffnet. Einen Service Worker gibt es nicht – die Seiten bleiben ohne JavaScript und brauchen eine Verbindung zum Server. Für ein Always-on-Display (z.B. ein E-Ink-Tablet an der Wand) die Adresse mit `?auto=1` öffnen: Die Seite lädt sich dann alle 30 Minuten neu. Wer dort weitergeblättert hat, landet beim Neuladen auf der letzten Seite, wenn es inzwischen weniger Stories gibt.
+Die Top Stories lassen sich genauso auf den Startbildschirm legen (eigenes Icon, Name „aRSSe“). Als eigenständige App ohne Adressleiste installiert Chrome sie nur über HTTPS (siehe [Reverse Proxy](#reverse-proxy-https)); unter `http://tower:8081` entsteht eine Verknüpfung, die im Browser öffnet. Einen Service Worker gibt es nicht – die Seiten bleiben ohne JavaScript und brauchen eine Verbindung zum Server. Für ein Always-on-Display (z.B. ein E-Ink-Tablet an der Wand) die Adresse mit `?auto=1` öffnen: Die Seite lädt sich dann alle 30 Minuten neu. Alle Links innerhalb der Top Stories behalten den Parameter; wer eine Story antippt und stehen lässt, landet nach 30 Minuten wieder auf der Titelseite. Wer weitergeblättert hat, landet beim Neuladen auf der letzten Seite, wenn es inzwischen weniger Stories gibt.
 
 ### Native Apps
 
@@ -233,6 +233,7 @@ Danach `docker compose up -d intelligence`. Statt `WEB_PASSWORD` geht auch `WEB_
 **Über den Reverse Proxy** (z.B. Authelia, Authentik oder `auth_basic` in nginx): Mit `WEB_AUTH_MODE=proxy` erwarten die Top Stories den angemeldeten Benutzer im Header `Remote-User` (`WEB_AUTH_PROXY_HEADER`, nur Buchstaben, Ziffern und `-` – Header mit `_` verwirft der Webserver) und glauben ihn nur von den Adressen in `WEB_TRUSTED_PROXIES`. Anfragen von anderen Adressen oder ohne den Header lehnt der Dienst mit `403` ab.
 
 - Den Header setzt der Proxy, nginx z.B. mit `proxy_set_header Remote-User $remote_user;` (bei `auth_basic`, siehe Beispiel unten); Authelia und Authentik liefern ihn über `auth_request` und `auth_request_set` (siehe deren nginx-Anleitung).
+- Nehmen Sie `/static/` von der Anmeldung am Proxy aus (bei nginx `location /static/` mit `auth_basic off;`, siehe Beispiel unten; bei Authelia und Authentik eine Regel ohne Anmeldung für diesen Pfad). Dort liegen nur Manifest und Icons für den Startbildschirm, und Android holt die Icons teils ohne Zugangsdaten ab. Das Manifest selbst lädt der Browser mit der Anmeldung.
 - In `WEB_TRUSTED_PROXIES` gehört genau die Adresse, von der die Anfragen des Proxys im Container ankommen, kein ganzes Netz. Läuft nginx direkt auf dem Server, ist das nicht `127.0.0.1`, sondern wie bei `TRUSTED_PROXIES` das Gateway des `arsse-network` (Befehl unten); beim Proxy-Container dessen Adresse im `arsse-network`.
 - Veröffentlichen Sie den Port dann nicht mehr im Netz (`INTELLIGENCE_PORT=127.0.0.1:8081` oder der Proxy im `arsse-network`, siehe unten). Das ist Pflicht: Bei einem im Netz veröffentlichten Port können auch Anfragen anderer Geräte vom Gateway kommen (z.B. per IPv6 über Dockers Port-Proxy), und die könnten den Header selbst schicken.
 
@@ -327,6 +328,16 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         # Nur mit WEB_AUTH_MODE=proxy: angemeldeten Benutzer weitergeben
         #proxy_set_header Remote-User $remote_user;
+    }
+
+    # Manifest und Icons für den Startbildschirm: Android holt die Icons
+    # teils ohne Zugangsdaten ab (keine Inhalte aus Ihren Feeds)
+    location /static/ {
+        auth_basic off;
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```

@@ -4,13 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-{% if auto_refresh %}<meta http-equiv="refresh" content="{{ auto_refresh }}">
+{% if auto_refresh %}<meta http-equiv="refresh" content="{{ auto_refresh }}{% if refresh_url %}; url={{ refresh_url }}{% endif %}">
 {% endif %}
 <meta name="theme-color" content="#000000">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="aRSSe">
-<link rel="manifest" href="/static/manifest.webmanifest">
+{# use-credentials: browsers fetch the manifest without the login otherwise,
+   and a login at the reverse proxy covers /static/ as well #}
+<link rel="manifest" href="/static/manifest.webmanifest" crossorigin="use-credentials">
 <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="32x32">
 <link rel="apple-touch-icon" href="/static/icon-192.png">
@@ -94,8 +96,8 @@
 </head>
 <body>
 <header>
-  <h1><a href="/">aRSSe</a></h1>
-  <nav><a href="/">Top Stories</a><a href="{{ miniflux_url }}">Miniflux</a></nav>
+  <h1><a href="{{ nav('/') }}">aRSSe</a></h1>
+  <nav><a href="{{ nav('/') }}">Top Stories</a><a href="{{ miniflux_url }}">Miniflux</a></nav>
 </header>
 <main>
 {% block content %}{% endblock %}

@@ -14,10 +14,11 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from flask import (Flask, Response, abort, g, jsonify, redirect, render_template,
                    request, send_from_directory, url_for)
+from jinja2 import BaseLoader
 from markupsafe import Markup
 
 from config import Config, WebAuthConfig, resolve_timezone
@@ -40,8 +41,8 @@ SECURITY_HEADERS = {
     'Referrer-Policy': 'same-origin',
     'Cross-Origin-Resource-Policy': 'same-origin',
 }
-# Reachable without login: the Docker health check and files a browser
-# fetches without credentials (web app manifest and its icons)
+# Reachable without login: the Docker health check and the home-screen files
+# (manifest and icons; Android fetches the icons without credentials)
 PUBLIC_PATHS = ('/healthz',)
 PUBLIC_PREFIXES = ('/static/',)
 # Always accepted Host names, so the health check and local calls work
@@ -228,12 +229,33 @@ def require_same_origin() -> None:
         abort(403)
 
 
+class DedentLoader(BaseLoader):
+    """
+    Strip the leading indentation of every template line.
+
+    lstrip_blocks only removes it before block tags; the indentation of
+    plain HTML lines would otherwise cost about 2 KB on a busy front page.
+    None of the templates contains whitespace-sensitive markup (<pre>).
+    """
+
+    def __init__(self, loader):
+        self.loader = loader
+
+    def get_source(self, environment, template):
+        source, filename, uptodate = self.loader.get_source(environment, template)
+        return re.sub(r'(?m)^[ \t]+', '', source), filename, uptodate
+
+    def list_templates(self):
+        return self.loader.list_templates()
+
+
 def create_app(config: Config, store: StoryStore) -> Flask:
     """Create the Flask application."""
     app = Flask(__name__, static_folder=STATIC_DIR)
     # Template indentation is not sent: every KB counts on E-Ink readers
     app.jinja_env.trim_blocks = True
     app.jinja_env.lstrip_blocks = True
+    app.jinja_env.loader = DedentLoader(app.jinja_env.loader)
     zone = resolve_timezone(config.web.timezone)
     public_url = config.miniflux_public_url.rstrip('/')
     max_age_hours = config.scheduling.lookback_hours
@@ -342,12 +364,22 @@ def create_app(config: Config, store: StoryStore) -> Flask:
                 for day, group in groupby(dated, key=lambda pair: pair[0].astimezone(zone)
                                           .date() if pair[0] else None)]
 
+    def always_on() -> bool:
+        """The page was opened as an always-on display (?auto=1)."""
+        return request.args.get('auto') == '1'
+
+    def nav(path: str, **args) -> str:
+        """Link to one of our pages, keeping ?auto=1 on an always-on display."""
+        if always_on():
+            args['auto'] = 1
+        return f"{path}?{urlencode(args)}" if args else path
+
     @app.context_processor
     def helpers():
         return {'entry_link': entry_link, 'safe_url': safe_url, 'miniflux_url': miniflux_base(),
                 'display_title': display_title, 'select_coverage': select_coverage,
-                'timeline': timeline, 'auto_refresh': AUTO_REFRESH_SECONDS
-                if request.args.get('auto') == '1' else None}
+                'timeline': timeline, 'nav': nav,
+                'auto_refresh': AUTO_REFRESH_SECONDS if always_on() else None}
 
     def top_stories() -> list:
         return store.top_stories(max_age_hours, config.web.max_stories,
@@ -356,10 +388,7 @@ def create_app(config: Config, store: StoryStore) -> Flask:
 
     def page_url(page: int) -> str:
         """Link to another page of the front page, keeping ?auto=1."""
-        args = {'seite': page} if page > 1 else {}
-        if request.args.get('auto') == '1':
-            args['auto'] = 1
-        return url_for('index', **args)
+        return nav(url_for('index'), **({'seite': page} if page > 1 else {}))
 
     @app.get('/')
     def index():
@@ -376,7 +405,7 @@ def create_app(config: Config, store: StoryStore) -> Flask:
         if page > pages:
             # An always-on display stays on the page it paged to; when stories
             # age out it must land on the last page, not a 404 that never reloads
-            if request.args.get('auto') == '1':
+            if always_on():
                 return redirect(page_url(pages))
             abort(404)
         return render_template(
@@ -395,12 +424,18 @@ def create_app(config: Config, store: StoryStore) -> Flask:
     def story(story_id: str):
         found = store.get_story(story_id, max_age_hours, config.web.earlier_articles_max)
         if not found:
+            # The story aged out while an always-on display showed it
+            if always_on():
+                return redirect(page_url(1))
             abort(404)
         chronological = request.args.get('ansicht') == 'chronologisch'
         return render_template(
             'story.html',
             story=found,
             chronological=chronological,
+            # An always-on display returns to the front page instead of
+            # showing the story someone tapped into forever
+            refresh_url=page_url(1),
             # Oldest and newest article in the window (articles are newest first)
             first=found['articles'][-1],
             last=found['articles'][0],

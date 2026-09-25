@@ -430,8 +430,9 @@ Teil-Refresh mit Geisterbildern kostet:
 - *Story-Seite:* „Nach Aktualität“ (neueste zuerst, je Artikel ein eigener 44-px-Link
   „Original“ zum Anbieter) oder `?ansicht=chronologisch` (älteste zuerst, nach Tagen
   gruppiert, mit einer Zeile Snippet je Artikel).
-- *Titel ohne Text:* Ein Artikel ohne Titel (z. B. ein Nachrichtenticker) erscheint als
-  „MDR: +++ Landtag wählt …“ (Feed und die ersten 80 Zeichen) statt „(ohne Titel)“.
+- *Artikel ohne Titel:* Ein Artikel ohne Titel erscheint als „MDR: Landtag wählt neuen
+  Präsidenten …“ (Feed und die ersten 80 Zeichen) statt „(ohne Titel)“. Ticker ohne Titel,
+  deren Text mit „+++“ beginnt, erreichen keine Story (siehe Clustering oben).
 - *Bedienung:* Jede Zeile der Berichterstattung ist ein Block-Link mit Quelle und Uhrzeit,
   mindestens 44 px hoch. Titel sind dünn unterstrichen; bereits geöffnete Artikel
   erscheinen grau (ohne Farben auf Graustufen-Displays sonst nicht zu unterscheiden;
@@ -439,16 +440,22 @@ Teil-Refresh mit Geisterbildern kostet:
   Browser). „Gleichlautende Meldungen“ behält sein Aufklapp-Dreieck. Pfeile sind für
   Screenreader ausgeblendet (`aria-hidden`).
 - *Always-on:* `?auto=1` lädt die Seite alle 30 Minuten neu (`<meta http-equiv=refresh>`,
-  kein JavaScript); die Seiten-Links behalten den Parameter. Gibt es die Seite nach dem
+  kein JavaScript). Alle Links auf die eigenen Seiten behalten den Parameter (Kopfzeile,
+  Seiten, Story-Seiten und „Zurück zu Top Stories“, `nav()` in `web.py`); eine Story-Seite
+  mit `?auto=1` lädt nach 30 Minuten wieder die Titelseite (`url=/?auto=1`), damit ein
+  Wand-Display nicht bei einer angetippten Story stehen bleibt. Gibt es die Seite nach dem
   Neuladen nicht mehr (Stories sind aus dem Zeitfenster gefallen), leitet `?auto=1` auf
-  die letzte vorhandene Seite um statt auf eine 404 ohne Neuladen; ohne `?auto=1` bleibt
-  es bei 404.
+  die letzte vorhandene Seite bzw. von einer Story auf die Titelseite um statt auf eine
+  404 ohne Neuladen; ohne `?auto=1` bleibt es bei 404.
 - *Startbildschirm:* `intelligence/static/` enthält `manifest.webmanifest` (`start_url` `/`,
   `display: standalone`), PNG-Icons in 192 und 512 px, ein SVG-Icon und `favicon.ico`
   (auch unter `/favicon.ico`). Die Icons erzeugt `scripts/make-icons.py` nur mit der
   Standardbibliothek. Einen Service Worker gibt es nicht, die Seiten bleiben ohne
-  JavaScript. `/static/` ist ohne Anmeldung erreichbar, weil Browser Manifest und Icons
-  ohne Zugangsdaten abrufen; `/favicon.ico` und alle Seiten verlangen sie.
+  JavaScript. Der Manifest-Link trägt `crossorigin="use-credentials"`: Ohne das holen
+  Browser das Manifest ohne Zugangsdaten, und eine Anmeldung am Reverse Proxy (die auch
+  `/static/` abdeckt) beantwortet es mit 401 – die Seite ist dann nicht installierbar.
+  `/static/` ist trotzdem ohne Anmeldung erreichbar, weil Android die Icons teils ohne
+  Zugangsdaten abruft; `/favicon.ico` und alle Seiten verlangen sie.
 
 **Zugriffsschutz der Top Stories** (`web.auth`, `web.allowed_hosts`): Ein `before_request`-
 Hook prüft jede Anfrage in dieser Reihenfolge:

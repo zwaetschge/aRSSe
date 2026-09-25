@@ -119,6 +119,33 @@ def test_auto_refresh_only_on_request(config, store):
     assert 'href="/?seite=2&amp;auto=1"' in html
 
 
+def test_auto_refresh_survives_opening_a_story(config, store):
+    config.web.articles_per_story = 1  # a link to every story page
+    save_stories(store, 12, feeds=3)
+    http = create_app(config, store).test_client()
+    html = http.get('/?auto=1').get_data(as_text=True)
+    # Every link to our own pages keeps the flag: header, 'Alle N Artikel'
+    own = re.findall(r'<a [^>]*href="(/[^"]*)"', html)
+    assert own and all(link.endswith('auto=1') for link in own), own
+    story = re.search(r'href="(/story/[0-9a-f]+\?auto=1)"', html).group(1)
+    html = http.get(story).get_data(as_text=True)
+    # A passer-by opened a story: the display returns to the front page
+    assert '<meta http-equiv="refresh" content="1800; url=/?auto=1">' in html
+    own = re.findall(r'<a [^>]*href="(/[^"]*)"', html)
+    assert own and all(link.endswith('auto=1') for link in own), own
+    assert f'{story.split("?")[0]}?ansicht=chronologisch&amp;auto=1' in html
+    back = re.search(r'<a class="more" href="([^"]*)"', html).group(1)
+    assert back == '/?auto=1'
+    assert 'http-equiv="refresh"' in http.get(back).get_data(as_text=True)
+    # The story aged out while it was shown: back to the front page, not a
+    # 404 that never reloads
+    assert http.get('/story/000000000000?auto=1').headers['Location'] == '/?auto=1'
+    assert http.get('/story/000000000000').status_code == 404
+    # Without the flag nothing changes
+    html = http.get(story.split('?')[0]).get_data(as_text=True)
+    assert 'http-equiv="refresh"' not in html and 'auto=1' not in html
+
+
 def test_auto_refresh_survives_fewer_pages(config, store):
     config.web.page_size = 3
     save_stories(store, 7)
@@ -146,7 +173,12 @@ FEED_NAMES = ['Tagesschau', 'Spiegel', 'Zeit', 'FAZ', 'SZ', 'taz', 'Deutschlandf
 def test_first_page_of_a_busy_day_stays_small(config, store):
     # Busier than the reference corpus: every story on page 1 has 8 sources
     # (a full coverage list and a link to the rest), a full snippet and
-    # titles of the corpus' average length (70 characters)
+    # titles of the corpus' average length (70 characters). Shortly after
+    # midnight, the worst case: every time is yesterday's and carries a
+    # weekday ('Do 23:41'). A whole-hour zone puts local time between 00:00
+    # and 01:00 whatever the clock says; the articles are 1-1.5 hours old.
+    hour = datetime.now(timezone.utc).hour
+    config.web.timezone = f'Etc/GMT+{hour}' if hour <= 12 else f'Etc/GMT-{24 - hour}'
     entries, clusters = [], []
     for k in range(30):
         ids = list(range(k * 8 + 1, k * 8 + 9))
@@ -161,6 +193,7 @@ def test_first_page_of_a_busy_day_stays_small(config, store):
     config.miniflux_public_url = 'https://miniflux.example.com'
     html = create_app(config, store).test_client().get('/').get_data()
     assert len(stories_on(html.decode())) == 10
+    assert len(re.findall(r'<time [^>]*>[A-Z][a-z] \d\d:\d\d</time>', html.decode())) == 70
     assert len(html) < 25_000, len(html)
 
 
@@ -415,7 +448,10 @@ def test_manifest_and_icons(config, store):
     assert favicon.status_code == 200 and favicon.get_data()[:4] == b'\x00\x00\x01\x00'
 
     html = http.get('/').get_data(as_text=True)
-    for tag in ('<link rel="manifest" href="/static/manifest.webmanifest">',
+    # use-credentials: without it browsers fetch the manifest without the
+    # login, and a reverse proxy asking for one answers 401
+    for tag in ('<link rel="manifest" href="/static/manifest.webmanifest" '
+                'crossorigin="use-credentials">',
                 '<link rel="apple-touch-icon" href="/static/icon-192.png">',
                 '<meta name="theme-color" content="#000000">'):
         assert tag in html

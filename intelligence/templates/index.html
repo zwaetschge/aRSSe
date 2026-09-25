@@ -36,7 +36,7 @@
   </ul>
   {% endif %}
   {% if story.article_count > coverage | length + 1 or story.earlier_count %}
-  <a class="more" href="/story/{{ story.id }}">Alle {{ story.article_count }} Artikel
+  <a class="more" href="{{ nav('/story/' ~ story.id) }}">Alle {{ story.article_count }} Artikel
     {%- if story.earlier_count %} · {{ story.earlier_count }} frühere{% endif %} <span aria-hidden="true">→</span></a>
   {% endif %}
 </article>

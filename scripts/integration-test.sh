@@ -201,7 +201,7 @@ grep -q "Bundestag beschließt Haushalt" <<< "$HTML" \
     || { echo "Top Stories not shown with the right password"; exit 1; }
 curl -fsS "http://localhost:$IT_PORT/healthz" > /dev/null \
     || { echo "/healthz must stay reachable without credentials"; exit 1; }
-# Browsers fetch the manifest without credentials; the pages stay protected
+# Android fetches the icons without credentials; the pages stay protected
 curl -fsS "http://localhost:$IT_PORT/static/manifest.webmanifest" > /dev/null \
     || { echo "The web app manifest must be reachable without credentials"; exit 1; }
 CODE=$(http_code "http://localhost:$IT_PORT/?seite=1")
