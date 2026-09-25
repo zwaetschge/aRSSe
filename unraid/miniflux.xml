@@ -173,17 +173,28 @@
     Required="false"
     Mask="false"></Config>
 
+  <Config
+    Name="Trusted Reverse Proxies"
+    Target="TRUSTED_REVERSE_PROXY_NETWORKS"
+    Default="127.0.0.1/32"
+    Mode=""
+    Description="Adresse(n) Ihres Reverse Proxys (CIDR, kommagetrennt). Nur von dort glaubt Miniflux X-Forwarded-Proto und setzt dann sichere Cookies. Nicht leer lassen (127.0.0.1/32 = kein Proxy)."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">127.0.0.1/32</Config>
+
   <!-- Metrics -->
   <Config
     Name="Enable Metrics"
     Target="METRICS_COLLECTOR"
-    Default="1"
+    Default="0"
     Mode=""
-    Description="Prometheus-Metriken aktivieren (1 = aktiviert)"
+    Description="Prometheus-Metriken unter /metrics (1 = aktiviert). Hinter einem Reverse Proxy nur mit METRICS_USERNAME und METRICS_PASSWORD aktivieren."
     Type="Variable"
     Display="advanced"
     Required="false"
-    Mask="false">1</Config>
+    Mask="false">0</Config>
 
   <Config
     Name="Metrics Networks"

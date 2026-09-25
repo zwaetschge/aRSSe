@@ -71,6 +71,12 @@ class FakeClient:
         self.calls = []
         self.marked = []
         self.after_page = None
+        self.user = {'id': 2, 'username': 'leser', 'is_admin': False}
+
+    def me(self):
+        if isinstance(self.user, Exception):
+            raise self.user
+        return dict(self.user)
 
     def get_entries(self, *, status=None, published_after=None, order=None,
                     direction=None, limit=100, offset=0, before_entry_id=None,

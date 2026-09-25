@@ -9,10 +9,13 @@ Empty environment variables are ignored, so docker-compose can pass
 variables through without clobbering values from config.yaml.
 """
 
+import ipaddress
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -21,6 +24,7 @@ logger = logging.getLogger('arsse-intelligence')
 DUPLICATE_ACTIONS = ('none', 'mark_read')
 MARK_READ_SCOPES = ('visible', 'all')
 CANONICAL_STRATEGIES = ('longest', 'source_priority', 'newest')
+WEB_AUTH_MODES = ('none', 'basic', 'proxy')
 
 # Values accepted by older versions of config.yaml
 _LEGACY_DUPLICATE_ACTIONS = {'tag': 'none', 'hide': 'mark_read'}
@@ -80,6 +84,22 @@ class StorageConfig:
 
 
 @dataclass
+class WebAuthConfig:
+    """Access control for the Top Stories web interface."""
+    # 'none': open to everyone who reaches the port; 'basic': HTTP Basic
+    # Auth with username/password; 'proxy': a reverse proxy authenticates
+    # and passes the user in proxy_header
+    mode: str = "none"
+    username: str = ""
+    password: str = ""
+    # File with the password (Docker secret); takes precedence over password
+    password_file: str = ""
+    proxy_header: str = "Remote-User"
+    # Addresses (CIDR) whose proxy_header is trusted; required for 'proxy'
+    trusted_proxies: list = field(default_factory=list)
+
+
+@dataclass
 class WebConfig:
     """Configuration for the Top Stories web interface."""
     host: str = "0.0.0.0"
@@ -91,6 +111,10 @@ class WebConfig:
     min_sources: int = 2
     # Articles older than the lookback window listed on a story page
     earlier_articles_max: int = 20
+    # Host names the interface answers to (DNS rebinding protection);
+    # empty = any. localhost and loopback addresses are always allowed.
+    allowed_hosts: list = field(default_factory=list)
+    auth: WebAuthConfig = field(default_factory=WebAuthConfig)
 
 
 @dataclass
@@ -171,11 +195,15 @@ def _apply_yaml_config(config: Config, yaml_config: dict) -> None:
         if clustering.pop(key, None) is not None:
             logger.warning("clustering.%s is obsolete (DBSCAN was replaced); "
                            "use clustering.threshold instead", key)
+    auth = web.pop('auth', None)
     yaml_config = {**yaml_config, 'web': web, 'clustering': clustering}
 
     for section in ('clustering', 'deduplication', 'scheduling',
                     'storage', 'web', 'logging'):
         _apply_section(getattr(config, section), yaml_config.get(section))
+    if auth is not None and not isinstance(auth, dict):
+        raise ConfigError(f"web.auth must be a section (mode, username, ...), got {auth!r}")
+    _apply_section(config.web.auth, auth)
 
     if 'tagging' in yaml_config:
         logger.warning("The 'tagging' section is obsolete: Miniflux cannot "
@@ -220,6 +248,9 @@ def _apply_env_config(config: Config) -> None:
         config.miniflux_url = url
     if api_key := _env('MINIFLUX_API_KEY'):
         config.miniflux_api_key = api_key
+    if key_file := _env('MINIFLUX_API_KEY_FILE'):
+        # Docker secret: keeps the key out of 'docker inspect'
+        config.miniflux_api_key = _read_secret('MINIFLUX_API_KEY_FILE', key_file)
     if public_url := _env('MINIFLUX_PUBLIC_URL'):
         config.miniflux_public_url = public_url
     config.miniflux_public_port = _parse_port(
@@ -248,10 +279,43 @@ def _apply_env_config(config: Config) -> None:
     # Web
     if port := _env('WEB_PORT'):
         config.web.port = _env_number('WEB_PORT', port, int)
+    if hosts := _env('WEB_ALLOWED_HOSTS'):
+        config.web.allowed_hosts = _split_list(hosts)
+    auth = config.web.auth
+    if mode := _env('WEB_AUTH_MODE'):
+        auth.mode = mode
+    if username := _env('WEB_USERNAME'):
+        auth.username = username
+    if password := _env('WEB_PASSWORD'):
+        # Overrides a password_file from config.yaml; WEB_PASSWORD_FILE wins
+        auth.password, auth.password_file = password, ''
+    if password_file := _env('WEB_PASSWORD_FILE'):
+        auth.password_file = password_file
+    if header := _env('WEB_AUTH_PROXY_HEADER'):
+        auth.proxy_header = header
+    if proxies := _env('WEB_TRUSTED_PROXIES'):
+        auth.trusted_proxies = _split_list(proxies)
 
     # Logging
     if level := _env('LOG_LEVEL'):
         config.logging.level = level
+
+
+def _split_list(value: str) -> list:
+    """Split a comma- or space-separated environment variable."""
+    return [item for item in re.split(r'[,\s]+', value) if item]
+
+
+def _read_secret(name: str, path: str) -> str:
+    """Read a secret from a file (Docker secret), naming the setting on failure."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            value = f.read().strip()
+    except OSError as e:
+        raise ConfigError(f"{name}: cannot read '{path}': {e.strerror}") from None
+    if not value:
+        raise ConfigError(f"{name}: '{path}' is empty")
+    return value
 
 
 def _env_number(name: str, value: str, cast):
@@ -298,9 +362,73 @@ def _check_types(config: Config) -> None:
             raise ConfigError(f"{name} must be a non-empty string, got {value!r}")
 
 
+def _string_list(name: str, value) -> list:
+    """Accept a YAML list or a comma-separated string; reject anything else."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return _split_list(value)
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return [item.strip() for item in value if item.strip()]
+    raise ConfigError(f"{name} must be a list of strings, got {value!r}")
+
+
+def _host_name(name: str, value: str) -> str:
+    """Normalize an allowed host ('Tower.local:8081', '[fd00::1]') to its name."""
+    try:
+        parts = urlsplit(f'//{value}')
+        parts.port  # raises ValueError for 'tower.local:abc'
+        host = parts.hostname if '/' not in value else None
+    except ValueError:
+        host = None
+    if not host:
+        raise ConfigError(f"{name}: '{value}' is not a host name "
+                          f"(e.g. tower.local, without http://)")
+    return host
+
+
+def _validate_web_auth(config: Config) -> None:
+    """Check web.auth and web.allowed_hosts; read the password file."""
+    web = config.web
+    web.allowed_hosts = [_host_name('web.allowed_hosts', host) for host in
+                         _string_list('web.allowed_hosts', web.allowed_hosts)]
+    auth = web.auth
+    auth.trusted_proxies = _string_list('web.auth.trusted_proxies', auth.trusted_proxies)
+    for network in auth.trusted_proxies:
+        try:
+            ipaddress.ip_network(network, strict=False)
+        except ValueError:
+            raise ConfigError(f"web.auth.trusted_proxies: '{network}' is not an IP "
+                              f"address or network (e.g. 172.30.0.10/32)") from None
+    for name in ('mode', 'username', 'password', 'password_file', 'proxy_header'):
+        if not isinstance(getattr(auth, name), str):
+            raise ConfigError(f"web.auth.{name} must be a string, "
+                              f"got {getattr(auth, name)!r}")
+
+    auth.mode = auth.mode.strip().lower()
+    if auth.mode not in WEB_AUTH_MODES:
+        raise ConfigError(f"web.auth.mode must be one of {WEB_AUTH_MODES}, got '{auth.mode}'")
+    if auth.mode == 'basic':
+        if auth.password_file:
+            auth.password = _read_secret('web.auth.password_file', auth.password_file)
+        if not auth.username or ':' in auth.username:
+            raise ConfigError("web.auth.mode 'basic' needs web.auth.username (WEB_USERNAME) "
+                              "without ':'")
+        if not auth.password:
+            raise ConfigError("web.auth.mode 'basic' needs web.auth.password (WEB_PASSWORD) "
+                              "or web.auth.password_file (WEB_PASSWORD_FILE)")
+    elif auth.mode == 'proxy':
+        if not auth.trusted_proxies:
+            raise ConfigError("web.auth.mode 'proxy' needs web.auth.trusted_proxies "
+                              "(WEB_TRUSTED_PROXIES), the address of your reverse proxy")
+        if not auth.proxy_header.strip():
+            raise ConfigError("web.auth.proxy_header must not be empty")
+
+
 def _validate(config: Config) -> None:
     """Normalize legacy values and reject settings that cannot work."""
     _check_types(config)
+    _validate_web_auth(config)
     dedup = config.deduplication
     if dedup.duplicate_action in _LEGACY_DUPLICATE_ACTIONS:
         replacement = _LEGACY_DUPLICATE_ACTIONS[dedup.duplicate_action]

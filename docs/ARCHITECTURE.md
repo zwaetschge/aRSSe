@@ -269,6 +269,29 @@ Dark Mode über `prefers-color-scheme`. Artikel-Links führen nach Miniflux (`BA
 Zeigt `BASE_URL` auf eine Loopback-Adresse, setzt die Oberfläche die Links pro Anfrage
 aus dem aufgerufenen Host und `MINIFLUX_PORT` zusammen, da der Reader nie der Server ist.
 
+**Zugriffsschutz der Top Stories** (`web.auth`, `web.allowed_hosts`): Ein `before_request`-
+Hook prüft jede Anfrage in dieser Reihenfolge:
+1. *Host:* Ist `web.allowed_hosts` gesetzt, bekommt jeder andere Hostname `400` (Schutz vor
+   DNS-Rebinding); `localhost`, `127.0.0.1` und `::1` gehen immer.
+2. *Anmeldung:* `/healthz` (Docker-Health-Check) und `/static/` sind ausgenommen.
+   `basic` vergleicht Benutzer und Passwort in konstanter Zeit (`hmac.compare_digest`) und
+   antwortet sonst mit `401` und `WWW-Authenticate: Basic realm="aRSSe"`. `proxy` glaubt
+   den Header (`Remote-User`) nur, wenn die TCP-Gegenstelle in `trusted_proxies` liegt,
+   sonst `403`. `none` (Standard) lässt alles durch und warnt beim Start im Log.
+3. *CSRF:* Für alles außer GET/HEAD/OPTIONS muss `Sec-Fetch-Site` `same-origin` oder
+   `none` sein; ältere Browser ohne diesen Header müssen `Origin` bzw. `Referer` mit dem
+   aufgerufenen Host senden (`require_same_origin`). Basic Auth allein schützt nicht, weil
+   Browser gemerkte Zugangsdaten auch an fremde Formulare anhängen.
+
+Jede Antwort trägt `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline';
+…; frame-ancestors 'none'` (die Seiten haben kein JavaScript, nur einen `<style>`-Block),
+`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`
+und `Cross-Origin-Resource-Policy: same-origin`. HSTS setzt der Reverse Proxy.
+
+**Miniflux-Benutzer:** API-Keys von Miniflux haben keine Rechte-Einschränkung. Beim ersten
+Lauf fragt der Dienst `GET /v1/me` ab und warnt, wenn der Key einem Admin gehört; ist
+Miniflux nicht erreichbar, wiederholt er das beim nächsten Lauf, ohne den Lauf zu stören.
+
 **Miniflux-Themes:** `css/eink-theme.css` und `css/color-theme.css` als
 benutzerdefiniertes CSS. Miniflux liefert Manifest und Service Worker selbst mit,
 die PWA-Installation läuft über Miniflux.
@@ -284,9 +307,13 @@ die PWA-Installation läuft über Miniflux.
 **Technologie:** Nginx, Let's Encrypt
 
 **Funktionen:**
-- SSL-Terminierung
-- Reverse Proxy
-- Optional: Basic Auth / Authelia
+- SSL-Terminierung, HSTS
+- Reverse Proxy mit eigenem Hostnamen je Dienst (die Top Stories laufen nicht unter
+  einem Unterpfad)
+- Optional: Basic Auth / Authelia (Top Stories dann mit `WEB_AUTH_MODE=proxy`)
+- Miniflux vertraut `X-Forwarded-Proto` nur von `TRUSTED_PROXIES`
+  (`TRUSTED_REVERSE_PROXY_NETWORKS`) und setzt erst dann `Secure`-Cookies;
+  `/metrics` ist standardmäßig aus (`METRICS_COLLECTOR=0`)
 
 ## Datenfluss
 

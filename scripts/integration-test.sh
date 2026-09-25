@@ -3,8 +3,10 @@
 # aRSSe Integrationstest
 # ===========================================
 # Startet den kompletten Stack mit einem echten Miniflux, abonniert
-# synthetische Feeds und prüft, dass Stories entstehen und Duplikate in
-# Miniflux als gelesen markiert werden. Kollidiert nicht mit einem
+# synthetische Feeds als Benutzer ohne Admin-Rechte und prüft, dass Stories
+# entstehen, Duplikate in Miniflux als gelesen markiert werden und die
+# Absicherung greift (Passwortschutz, Sicherheits-Header, /metrics aus,
+# fremde Host-Header). Kollidiert nicht mit einem
 # laufenden Produktions-Stack (eigene Namen, Ports und Datenverzeichnisse).
 #
 # Varianten (Umgebungsvariablen):
@@ -21,6 +23,8 @@ WORK="$(mktemp -d)"
 MF_PORT="${MF_PORT:-18080}"
 IT_PORT="${IT_PORT:-18081}"
 ADMIN_PASSWORD="it-$(date +%s)-secret"
+READER_PASSWORD="it-reader-$(date +%s)"
+WEB_PASSWORD="it-web-secret"
 API="http://localhost:$MF_PORT/v1"
 PUID="${IT_PUID:-$(id -u)}"
 PGID="${IT_PGID:-$(id -g)}"
@@ -85,8 +89,11 @@ ENV
 step "Starting database, Miniflux and feed server"
 compose up -d --build --wait --wait-timeout 180 db miniflux feeds
 
-step "Creating API key"
-API_KEY=$(curl -fsS -u "admin:$ADMIN_PASSWORD" -H 'Content-Type: application/json' \
+step "Creating a reading user without admin rights and its API key (README)"
+curl -fsS -u "admin:$ADMIN_PASSWORD" -H 'Content-Type: application/json' \
+    -d "{\"username\": \"leser\", \"password\": \"$READER_PASSWORD\"}" \
+    "$API/users" > /dev/null
+API_KEY=$(curl -fsS -u "leser:$READER_PASSWORD" -H 'Content-Type: application/json' \
     -d '{"description": "integration test"}' "$API/api-keys" | json 'd["token"]')
 CATEGORY=$(curl -fsS -H "X-Auth-Token: $API_KEY" "$API/categories" | json 'd[0]["id"]')
 
@@ -141,5 +148,40 @@ grep -q "href=\"http://192.0.2.10:$MF_PORT/feed/" <<< "$HTML" \
 OWNER=$(stat -c %u:%g "$WORK/data/intelligence/arsse.db")
 echo "    arsse.db owned by $OWNER"
 [ "$OWNER" = "$PUID:$PGID" ] || { echo "Expected arsse.db owned by $PUID:$PGID, got $OWNER"; exit 1; }
+
+step "Checking security defaults"
+http_code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+HEADERS=$(curl -fsS -D - -o /dev/null "http://localhost:$IT_PORT/")
+grep -qi "^content-security-policy: default-src 'none'" <<< "$HEADERS" \
+    || { echo "Top Stories send no Content-Security-Policy"; exit 1; }
+LOGS=$(compose logs --no-color intelligence)
+grep -q "web.auth.mode=none" <<< "$LOGS" || { echo "No warning about the open Top Stories"; exit 1; }
+if grep -q "belongs to the admin user" <<< "$LOGS"; then
+    echo "Admin warning although the API key belongs to a normal user"; exit 1
+fi
+CODE=$(http_code "http://localhost:$MF_PORT/metrics")
+echo "    Miniflux /metrics: $CODE"
+[ "$CODE" != 200 ] || { echo "Miniflux serves /metrics by default"; exit 1; }
+
+step "Protecting Top Stories with a password (WEB_AUTH_MODE=basic)"
+cat >> "$WORK/.env" <<ENV
+WEB_AUTH_MODE=basic
+WEB_USERNAME=leser
+WEB_PASSWORD=$WEB_PASSWORD
+WEB_ALLOWED_HOSTS=localhost
+ENV
+# Recreated with the new environment; healthy only if /healthz stays open
+compose up -d --wait --wait-timeout 300 intelligence
+CODE=$(http_code "http://localhost:$IT_PORT/api/stories")
+[ "$CODE" = 401 ] || { echo "Expected 401 without credentials, got $CODE"; exit 1; }
+CODE=$(http_code -u "leser:falsch" "http://localhost:$IT_PORT/")
+[ "$CODE" = 401 ] || { echo "Expected 401 for a wrong password, got $CODE"; exit 1; }
+HTML=$(curl -fsS -u "leser:$WEB_PASSWORD" "http://localhost:$IT_PORT/")
+grep -q "Bundestag beschließt Haushalt" <<< "$HTML" \
+    || { echo "Top Stories not shown with the right password"; exit 1; }
+curl -fsS "http://localhost:$IT_PORT/healthz" > /dev/null \
+    || { echo "/healthz must stay reachable without credentials"; exit 1; }
+CODE=$(http_code -u "leser:$WEB_PASSWORD" -H "Host: rebind.example:$IT_PORT" "http://localhost:$IT_PORT/")
+[ "$CODE" = 400 ] || { echo "Expected 400 for a foreign Host header, got $CODE"; exit 1; }
 
 step "Integration test passed"

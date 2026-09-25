@@ -83,6 +83,8 @@ class NewsClusterer:
         self.client = client or self._create_client()
         self.stopwords = set(self._get_stopwords())
         self.stemmer = self._get_stemmer()
+        # Whose API key is it? Asked once Miniflux answers (see check_api_key_user)
+        self.api_key_checked = False
 
         logger.info("NewsClusterer initialized with threshold=%.2f, stemming=%s",
                     config.clustering.threshold, self.stemmer is not None)
@@ -147,6 +149,8 @@ class NewsClusterer:
             Dictionary with statistics about the clustering run.
         """
         start_time = time.time()
+        if not self.api_key_checked:
+            self.api_key_checked = check_api_key_user(self.client)
         stats = {
             'articles_processed': 0,
             'clusters_found': 0,
@@ -519,6 +523,31 @@ class NewsClusterer:
         self.client.update_entries(to_mark, status='read')
         self.store.record_auto_marked(to_mark)
         return len(to_mark)
+
+
+def check_api_key_user(client) -> bool:
+    """
+    Warn when MINIFLUX_API_KEY belongs to a Miniflux admin.
+
+    Miniflux API keys have no scopes: an admin's key can create users and
+    change passwords, far more than reading entries and marking them read.
+    Never raises, so an unreachable Miniflux cannot stop the service.
+
+    Returns:
+        True once the check ran, False if Miniflux could not be asked
+        (the caller retries with the next cycle).
+    """
+    try:
+        user = client.me()
+    except Exception as e:
+        logger.info("Could not check the Miniflux user of MINIFLUX_API_KEY yet: %s", e)
+        return False
+    if isinstance(user, dict) and user.get('is_admin'):
+        logger.warning("MINIFLUX_API_KEY belongs to the admin user '%s'. A leaked key would "
+                       "give full control over Miniflux. Create a user without admin rights "
+                       "for reading and use its API key (README, 'Absicherung').",
+                       user.get('username', '?'))
+    return True
 
 
 def _normalize(text: str) -> str:

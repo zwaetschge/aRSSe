@@ -58,7 +58,7 @@ Das Datenverzeichnis des Intelligence Layers (`${DATA_PATH}/intelligence`) muss 
 
 ### 5. Top Stories aktivieren
 
-Erzeugen Sie in Miniflux unter *Einstellungen > API-Schlüssel* einen Key, tragen Sie ihn als `MINIFLUX_API_KEY` in `.env` ein und starten Sie `docker compose up -d intelligence`. Die Top Stories sind dann unter `http://<unraid-ip>:8081` erreichbar.
+Erzeugen Sie in Miniflux unter *Einstellungen > API-Schlüssel* einen Key, tragen Sie ihn als `MINIFLUX_API_KEY` in `.env` ein und starten Sie `docker compose up -d intelligence`. Die Top Stories sind dann unter `http://<unraid-ip>:8081` erreichbar – ohne Anmeldung für jeden im Netz. Wie Sie sie mit einem Passwort schützen und warum der Key besser einem eigenen Benutzer ohne Admin-Rechte gehört, steht unter [Absicherung](#absicherung).
 
 Alternativ erledigt `scripts/setup.sh` die Schritte 2–4: Es erzeugt `.env` (Rechte 600) mit zwei zufälligen Passwörtern, setzt `BASE_URL` auf die erkannte IP-Adresse des Servers, legt die Datenverzeichnisse an und startet auf Nachfrage Datenbank und Miniflux. `--yes` startet ohne Rückfrage, `--no-start` gar nicht (Standard ohne Terminal, z.B. in Unraid User Scripts). Ein erneuter Aufruf ergänzt eine bestehende `.env` nur um Einträge, die in neueren Versionen von `.env.example` hinzugekommen sind, und warnt vor veralteten. Ersetzt werden einzig eine `BASE_URL`, die noch auf `localhost` zeigt, und leere oder Platzhalter-Passwörter (etwa nach `cp .env.example .env`), solange noch keine Datenbank existiert. Existiert die Datenbank schon, obwohl `.env` fehlt oder noch Platzhalter enthält, bricht das Skript ab, ohne etwas zu starten – stellen Sie dann `.env` aus dem Backup wieder her.
 
@@ -100,7 +100,7 @@ Die Miniflux-API kann keine Tags oder eigenen Metadaten schreiben – deshalb br
 | `/` | Top Stories aus mindestens zwei Feeds, gerankt nach Anzahl der Quellen und Aktualität – gezählt wird nur, was im Zeitfenster (24 Stunden) erschienen ist |
 | `/story/<id>` | Alle Artikel einer Story im Zeitfenster, darunter bis zu 20 ältere als „Frühere Berichte“ (mit Link auf das Original) |
 | `/api/stories` | Dieselben Daten als JSON |
-| `/healthz` | `200`, solange der letzte erfolgreiche Lauf weniger als drei Intervalle zurückliegt |
+| `/healthz` | `200`, solange der letzte erfolgreiche Lauf weniger als drei Intervalle zurückliegt (immer ohne Anmeldung) |
 
 Links führen in Miniflux (`BASE_URL`), damit Gelesen-Status und Volltext erhalten bleiben. Zeigt `BASE_URL` auf `localhost`, verwenden die Links stattdessen die Adresse, unter der die Top Stories aufgerufen wurden, mit `MINIFLUX_PORT` (beim Start erscheint dazu eine Warnung im Log).
 
@@ -194,35 +194,104 @@ Alternativ können folgende Apps die Miniflux-API nutzen:
 - **ReadYou** (Android): Material Design, E-Ink-freundlich
 - **Reeder** (iOS/macOS): Native Miniflux-Integration
 
-## Sicherheit
+## Absicherung
 
-### Reverse Proxy Setup
+Ohne weitere Einstellungen sind Miniflux (Port 8080) und die Top Stories (Port 8081) im ganzen Heimnetz erreichbar. Miniflux verlangt eine Anmeldung, die Top Stories nicht: Wer Port 8081 erreicht, sieht Ihre Abos und was Sie gelesen haben – der Gast im WLAN ebenso wie ein Gerät im Netz. Beim Start steht dazu eine Warnung im Log.
 
-Für externen Zugriff wird ein Reverse Proxy empfohlen:
+### Top Stories absichern
+
+**Mit Passwort** (am einfachsten, funktioniert auch auf E-Ink-Readern, die sich die Anmeldung merken) – in `.env`:
+
+```bash
+WEB_AUTH_MODE=basic
+WEB_USERNAME=leser
+WEB_PASSWORD=ein-langes-passwort
+```
+
+Danach `docker compose up -d intelligence`. Statt `WEB_PASSWORD` geht auch `WEB_PASSWORD_FILE` mit dem Pfad einer Datei im Container (Docker Secret). `/healthz` bleibt ohne Anmeldung erreichbar, der Health Check von Docker braucht es. Basic Auth überträgt das Passwort nur Base64-kodiert – außerhalb des Heimnetzes also nur über HTTPS (Reverse Proxy, siehe unten).
+
+**Über den Reverse Proxy** (z.B. Authelia, Authentik oder `auth_basic` in nginx): Mit `WEB_AUTH_MODE=proxy` erwarten die Top Stories den angemeldeten Benutzer im Header `Remote-User` (`WEB_AUTH_PROXY_HEADER`) und glauben ihn nur von den Adressen in `WEB_TRUSTED_PROXIES` – tragen Sie dort genau die IP-Adresse des Proxys ein, kein ganzes Netz, und veröffentlichen Sie den Port nicht mehr im Netz (`INTELLIGENCE_PORT=127.0.0.1:8081` oder der Proxy im `arsse-network`, siehe unten). Anfragen von anderen Adressen lehnt der Dienst mit `403` ab.
+
+**DNS-Rebinding:** Eine fremde Webseite kann ihren Namen auf die IP-Adresse Ihres Servers umbiegen und die Top Stories dann über Ihren Browser auslesen. `WEB_ALLOWED_HOSTS=tower.local,192.168.1.10` beantwortet nur Anfragen an diese Namen (`localhost` und `127.0.0.1` gehen immer), alle anderen mit `400`.
+
+Unabhängig davon senden die Top Stories eine strikte Content-Security-Policy (kein JavaScript, keine fremden Inhalte, nicht in Frames einbettbar) und weitere Sicherheits-Header; Anfragen, die etwas verändern, nehmen sie nur von der eigenen Seite an (Schutz vor CSRF).
+
+### Eigener Miniflux-Benutzer für die Top Stories
+
+API-Keys von Miniflux gelten ohne Einschränkung für ihren Benutzer: Mit dem Key des Admins lassen sich Benutzer anlegen und Passwörter ändern. Der Intelligence-Container verarbeitet fremdes HTML aus den Feeds und braucht nur Lese- und Gelesen-markieren-Rechte. Empfohlen:
+
+1. Als Admin unter *Einstellungen > Benutzer > Benutzer anlegen* einen Benutzer ohne Admin-Rechte anlegen, z.B. `leser`
+2. Als `leser` anmelden und die Feeds abonnieren – bestehende Abos übertragen *Abonnements > Exportieren* (als Admin) und *Abonnements > Importieren* (als `leser`) per OPML-Datei
+3. Als `leser` unter *Einstellungen > API-Schlüssel* einen Key erzeugen und als `MINIFLUX_API_KEY` eintragen
+4. Zum Lesen `leser` verwenden, den Admin nur zur Verwaltung
+
+Die Top Stories zeigen die Feeds und den Gelesen-Status des Benutzers, dem der Key gehört. Gehört er einem Admin, warnt der Dienst beim Start im Log. Statt `MINIFLUX_API_KEY` geht auch `MINIFLUX_API_KEY_FILE` (Pfad zu einer Datei im Container, z.B. ein Docker Secret) – dann taucht der Key nicht in `docker inspect` auf.
+
+### Reverse Proxy (HTTPS)
+
+Für den Zugriff von außen gehört ein Reverse Proxy mit HTTPS vor beide Dienste. Die Top Stories brauchen einen eigenen Hostnamen – unter einem Unterpfad wie `/stories/` funktionieren ihre Links nicht.
 
 ```nginx
+# Miniflux
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name news.example.com;
 
     ssl_certificate /etc/letsencrypt/live/news.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/news.example.com/privkey.pem;
 
+    # Prometheus-Metriken nie nach außen geben
+    location = /metrics { return 404; }
+
     location / {
-        proxy_pass http://localhost:8080;
+        proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
+
+# Top Stories
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name stories.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/stories.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/stories.example.com/privkey.pem;
+
+    # Anmeldung am Proxy (htpasswd -c /etc/nginx/arsse.htpasswd leser) –
+    # oder stattdessen WEB_AUTH_MODE=basic in .env
+    auth_basic "aRSSe";
+    auth_basic_user_file /etc/nginx/arsse.htpasswd;
+
+    location / {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
 ```
 
-### Authentifizierung
+Dazu in `.env`:
 
-- Miniflux bietet eigene Benutzerverwaltung
-- API-Keys für externe Anwendungen
-- Optional: Authelia/2FA am Reverse Proxy
+```bash
+BASE_URL=https://news.example.com
+# Nur noch über den Proxy erreichbar
+MINIFLUX_PORT=127.0.0.1:8080
+INTELLIGENCE_PORT=127.0.0.1:8081
+# Adresse, von der die Anfragen des Proxys bei Miniflux ankommen (siehe unten)
+TRUSTED_PROXIES=172.18.0.1/32
+WEB_ALLOWED_HOSTS=stories.example.com
+```
+
+- **`TRUSTED_PROXIES`:** Erst wenn Miniflux dem Proxy vertraut, glaubt es dessen `X-Forwarded-Proto: https` und markiert den Sitzungs-Cookie als `Secure`. Läuft nginx direkt auf dem Server, kommen seine Anfragen über die Docker-Portweiterleitung vom Gateway des `arsse-network`: `docker network inspect arsse-network -f '{{(index .IPAM.Config 0).Gateway}}'`. Danach die Anmeldung nur noch über die HTTPS-Adresse – den `Secure`-Cookie nimmt der Browser über `http://<server-ip>:8080` nicht an.
+- **Proxy als Container** (SWAG, Nginx Proxy Manager): `localhost` ist dort der Proxy-Container selbst. Hängen Sie ihn ans `arsse-network` (`docker network connect arsse-network swag`) und verwenden Sie `proxy_pass http://arsse-miniflux:8080` bzw. `http://arsse-intelligence:8081`; dann brauchen Miniflux und Top Stories gar keine veröffentlichten Ports (`127.0.0.1:…` genügt). `TRUSTED_PROXIES` bzw. `WEB_TRUSTED_PROXIES` ist dann die Adresse des Proxys im `arsse-network`: `docker inspect -f '{{with index .NetworkSettings.Networks "arsse-network"}}{{.IPAddress}}{{end}}' swag`. Achten Sie darauf, dass der Proxy den `Host`-Header weitergibt.
+- **Metriken:** `/metrics` von Miniflux ist standardmäßig aus (`METRICS_COLLECTOR=0`). Wer es für Prometheus einschaltet, setzt zusätzlich `METRICS_USERNAME` und `METRICS_PASSWORD` – über den Proxy kommen alle Anfragen aus einem 172er-Netz, `METRICS_ALLOWED_NETWORKS` allein schützt dann nicht.
+- **Zwei Faktoren:** z.B. Authelia oder Authentik am Reverse Proxy; die Top Stories übernehmen den dort angemeldeten Benutzer mit `WEB_AUTH_MODE=proxy`.
 
 ## Troubleshooting
 
@@ -236,6 +305,7 @@ server {
 6. Alle Links der Top Stories zeigen auf `localhost` oder die falsche Adresse: `BASE_URL` in `.env` setzen und `docker compose up -d` ausführen
 7. `Datenbank stammt von neuerer aRSSe-Version`: Das Image ist älter als die Datenbank (z.B. nach einem Rückschritt auf eine ältere Version). Entweder wieder die neuere Version starten, ein Backup von `arsse.db` aus der Zeit vor dem Update einspielen oder `${DATA_PATH}/intelligence/arsse.db*` löschen – die Datenbank ist nur ein Zwischenspeicher und wird beim nächsten Lauf aus Miniflux neu aufgebaut. Dabei ändern sich die Story-IDs, und aRSSe vergisst, welche Duplikate es schon als gelesen markiert hat: Duplikate im aktuellen Zeitfenster, die Sie wieder auf ungelesen gesetzt haben, werden einmal erneut als gelesen markiert
 8. Der Container startet nicht und das Log nennt eine Einstellung (z.B. `scheduling.batch_size must be between 1 and 1000`): den Wert in `config.yaml` bzw. `.env` korrigieren
+9. Top Stories antworten mit `400`: Der aufgerufene Hostname fehlt in `WEB_ALLOWED_HOSTS`. Mit `403` bei `WEB_AUTH_MODE=proxy`: Die Anfrage kam nicht von einer Adresse in `WEB_TRUSTED_PROXIES` oder ohne Benutzer-Header – das Log nennt die Adresse
 
 ### E-Ink-Darstellung fehlerhaft
 

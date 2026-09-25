@@ -200,14 +200,17 @@ STUB_PATH="$NODOCKER" run_setup
 check_fresh_env
 grep -q "Docker ist nicht installiert" <<< "$OUT" || fail "Hinweis auf fehlendes Docker fehlt"
 
-step "MINIFLUX_PORT mit Host-Adresse (127.0.0.1:8090)"
+step "MINIFLUX_PORT/INTELLIGENCE_PORT mit Host-Adresse (127.0.0.1:8090)"
 new_project hostport
-sed 's/^MINIFLUX_PORT=.*/MINIFLUX_PORT=127.0.0.1:8090/' "$PROJ/.env.example" > "$PROJ/.env.example.new"
+sed -e 's/^MINIFLUX_PORT=.*/MINIFLUX_PORT=127.0.0.1:8090/' \
+    -e 's/^INTELLIGENCE_PORT=.*/INTELLIGENCE_PORT=127.0.0.1:8091/' \
+    "$PROJ/.env.example" > "$PROJ/.env.example.new"
 mv "$PROJ/.env.example.new" "$PROJ/.env.example"
 run_setup --no-start
 [ "$STATUS" -eq 0 ] || fail "Exit-Code $STATUS"
 [ "$(env_value BASE_URL)" = "http://192.0.2.7:8090" ] || fail "BASE_URL ist $(env_value BASE_URL)"
 grep -q "http://192.0.2.7:8090" <<< "$OUT" || fail "Adresse in 'Nächste Schritte' falsch"
+grep -q "http://192.0.2.7:8091" <<< "$OUT" || fail "Top-Stories-Adresse in 'Nächste Schritte' falsch"
 
 step "Ältere .env wird ergänzt, eigene Werte bleiben"
 new_project upgrade

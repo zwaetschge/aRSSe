@@ -115,6 +115,29 @@ web:
   # Ältere Artikel einer Story (vor dem Zeitfenster), die ihre Seite unter
   # „Frühere Berichte“ zusätzlich auflistet (0 = keine)
   earlier_articles_max: 20
+  # Nur Anfragen an diese Hostnamen beantworten (Schutz vor DNS-Rebinding),
+  # z.B. ["tower.local", "192.168.1.10"]. localhost und 127.0.0.1 gehen
+  # immer. Leer = jeder Hostname (WEB_ALLOWED_HOSTS, kommagetrennt)
+  allowed_hosts: []
+
+  # Zugriffsschutz (README, Abschnitt "Absicherung"). /healthz bleibt offen.
+  auth:
+    # "none":  offen für alle, die den Port erreichen (beim Start: Warnung)
+    # "basic": Anmeldung mit username/password (HTTP Basic Auth)
+    # "proxy": Ein Reverse Proxy (z.B. Authelia) meldet an und übergibt den
+    #          Benutzer in proxy_header
+    # Umgebungsvariable: WEB_AUTH_MODE
+    mode: "none"
+    # Für "basic"; besser über WEB_USERNAME und WEB_PASSWORD bzw.
+    # WEB_PASSWORD_FILE in .env als hier im Klartext
+    username: ""
+    password: ""
+    password_file: ""
+    # Für "proxy": Header mit dem Benutzernamen (WEB_AUTH_PROXY_HEADER) und
+    # die Adressen des Proxys (WEB_TRUSTED_PROXIES), z.B. ["172.18.0.5/32"].
+    # Von allen anderen Adressen wird die Anfrage abgelehnt.
+    proxy_header: "Remote-User"
+    trusted_proxies: []
 
 # Logging
 logging:

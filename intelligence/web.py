@@ -5,6 +5,7 @@ Server-rendered, JavaScript-free and without external resources, so it
 works on E-Ink readers and behind restrictive networks alike.
 """
 
+import hmac
 import ipaddress
 import logging
 import re
@@ -12,15 +13,35 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlsplit
 
-from flask import Flask, abort, jsonify, render_template, request
+from flask import Flask, Response, abort, g, jsonify, render_template, request
 
-from config import Config
+from config import Config, WebAuthConfig
 from store import StoryStore, parse_date
 
 logger = logging.getLogger('arsse-intelligence')
 
 # Hostnames and IP literals as they may appear in a Host header
 _HOSTNAME = re.compile(r'^[A-Za-z0-9._-]+$|^[0-9A-Fa-f:.]+$')
+
+# The pages have no JavaScript and load nothing from elsewhere, so the
+# policy can forbid everything except the inline <style> block
+CONTENT_SECURITY_POLICY = ("default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "
+                           "manifest-src 'self'; base-uri 'none'; form-action 'self'; "
+                           "frame-ancestors 'none'")
+SECURITY_HEADERS = {
+    'Content-Security-Policy': CONTENT_SECURITY_POLICY,
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'same-origin',
+    'Cross-Origin-Resource-Policy': 'same-origin',
+}
+# Reachable without login: the Docker health check and files a browser
+# fetches without credentials (web app manifest)
+PUBLIC_PATHS = ('/healthz',)
+PUBLIC_PREFIXES = ('/static/',)
+# Always accepted Host names, so the health check and local calls work
+LOOPBACK_HOSTS = ('localhost', '127.0.0.1', '::1')
+SAFE_METHODS = ('GET', 'HEAD', 'OPTIONS')
 
 
 def is_loopback_url(url: str) -> bool:
@@ -49,6 +70,92 @@ def request_hostname() -> Optional[str]:
     return f'[{host}]' if ':' in host else host
 
 
+def _unauthorized() -> Response:
+    return Response('Anmeldung erforderlich\n', 401, {
+        'WWW-Authenticate': 'Basic realm="aRSSe", charset="UTF-8"',
+        'Content-Type': 'text/plain; charset=utf-8',
+    })
+
+
+def _peer_address(remote_addr: Optional[str]):
+    """TCP peer of the request as an IP address, or None."""
+    try:
+        address = ipaddress.ip_address(remote_addr or '')
+    except ValueError:
+        return None
+    # IPv4 clients on a dual-stack socket appear as ::ffff:a.b.c.d
+    if address.version == 6 and address.ipv4_mapped:
+        return address.ipv4_mapped
+    return address
+
+
+def _authenticate(auth: WebAuthConfig, networks: list) -> Optional[Response]:
+    """Check the request against web.auth; returns an error response or None."""
+    if auth.mode == 'basic':
+        credentials = request.authorization
+        if credentials is None or credentials.type != 'basic':
+            return _unauthorized()
+        # Compare both parts in constant time, without short-circuiting
+        user_ok = hmac.compare_digest((credentials.username or '').encode(),
+                                      auth.username.encode())
+        password_ok = hmac.compare_digest((credentials.password or '').encode(),
+                                          auth.password.encode())
+        if not (user_ok & password_ok):
+            return _unauthorized()
+        g.user = auth.username
+    elif auth.mode == 'proxy':
+        # Only the proxy may set the header: anyone else could just send it
+        peer = _peer_address(request.remote_addr)
+        user = request.headers.get(auth.proxy_header, '').strip()
+        if peer is None or not any(peer in network for network in networks):
+            logger.info("Rejected request from %s: not in web.auth.trusted_proxies",
+                        request.remote_addr)
+            abort(403)
+        if not user:
+            logger.info("Rejected request from %s: no %s header", request.remote_addr,
+                        auth.proxy_header)
+            abort(403)
+        g.user = user
+    return None
+
+
+def _origin_host(value: str) -> Optional[str]:
+    """host[:port] of an Origin or Referer, without default ports."""
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
+    if parts.scheme not in ('http', 'https') or not parts.netloc:
+        return None
+    return _strip_default_port(parts.netloc)
+
+
+def _strip_default_port(host: str) -> str:
+    host = host.lower().rsplit('@', 1)[-1]
+    for port in (':80', ':443'):
+        if host.endswith(port):
+            return host[:-len(port)]
+    return host
+
+
+def require_same_origin() -> None:
+    """
+    Reject cross-site requests (CSRF) to state-changing routes with 403.
+
+    Browsers send Sec-Fetch-Site; older ones at least Origin or Referer,
+    which must name the host the request went to. Basic Auth alone does
+    not help: browsers attach cached credentials to cross-site forms too.
+    """
+    site = request.headers.get('Sec-Fetch-Site')
+    if site is not None:
+        if site in ('same-origin', 'none'):
+            return
+        abort(403)
+    source = request.headers.get('Origin') or request.headers.get('Referer')
+    if not source or _origin_host(source) != _strip_default_port(request.host):
+        abort(403)
+
+
 def create_app(config: Config, store: StoryStore) -> Flask:
     """Create the Flask application."""
     app = Flask(__name__)
@@ -64,6 +171,46 @@ def create_app(config: Config, store: StoryStore) -> Flask:
                        "port %d instead. Set BASE_URL in .env to the address your "
                        "devices use.", public_url, config.miniflux_public_port)
     base_path = urlsplit(public_url).path.rstrip('/') if loopback else ''
+
+    auth = config.web.auth
+    trusted_networks = [ipaddress.ip_network(n, strict=False) for n in auth.trusted_proxies]
+    allowed_hosts = ({h.lower() for h in config.web.allowed_hosts} | set(LOOPBACK_HOSTS)
+                     if config.web.allowed_hosts else None)
+    if auth.mode == 'none':
+        logger.warning("Top Stories are not protected (web.auth.mode=none): everyone who "
+                       "reaches port 8081 can read your subscriptions and read status. Set "
+                       "WEB_AUTH_MODE=basic with WEB_USERNAME/WEB_PASSWORD, or protect the "
+                       "port at your reverse proxy (README, 'Absicherung').")
+    else:
+        logger.info("Top Stories require authentication (web.auth.mode=%s)", auth.mode)
+
+    @app.before_request
+    def guard():
+        """Host allowlist, authentication and CSRF check for every request."""
+        if allowed_hosts is not None:
+            try:
+                host = urlsplit(f'//{request.host}').hostname
+            except ValueError:
+                host = None
+            if host not in allowed_hosts:
+                # DNS rebinding: a foreign page resolving its name to this server
+                logger.info("Rejected request for host '%s' (web.allowed_hosts)",
+                            request.host)
+                abort(400)
+        if request.path in PUBLIC_PATHS or request.path.startswith(PUBLIC_PREFIXES):
+            return None
+        denied = _authenticate(auth, trusted_networks)
+        if denied is not None:
+            return denied
+        if request.method not in SAFE_METHODS:
+            require_same_origin()
+        return None
+
+    @app.after_request
+    def security_headers(response):
+        for name, value in SECURITY_HEADERS.items():
+            response.headers.setdefault(name, value)
+        return response
 
     def miniflux_base() -> str:
         """Base URL of Miniflux as seen by the current browser."""

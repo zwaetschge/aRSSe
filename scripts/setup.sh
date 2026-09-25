@@ -424,6 +424,7 @@ print_next_steps() {
     host="${IP:-<server-ip>}"
     port=$(miniflux_port)
     intelligence_port=$(env_get INTELLIGENCE_PORT)
+    intelligence_port="${intelligence_port##*:}"
     intelligence_port="${intelligence_port:-8081}"
 
     echo "1. Öffnen Sie Miniflux im Browser:"
@@ -436,6 +437,8 @@ print_next_steps() {
     echo ""
     echo "4. (Optional) Generieren Sie einen API-Key unter:"
     echo "   Einstellungen > API-Schlüssel"
+    echo "   Empfohlen: als eigener Benutzer ohne Admin-Rechte, mit dem Sie"
+    echo "   auch lesen (Einstellungen > Benutzer, siehe README 'Absicherung')"
     echo ""
     echo "5. (Optional) Fügen Sie das E-Ink-Theme hinzu unter:"
     echo "   Einstellungen > Benutzerdefiniertes CSS"
@@ -447,6 +450,7 @@ print_next_steps() {
     echo "   a. Tragen Sie den API-Key in .env ein (MINIFLUX_API_KEY=...)"
     echo "   b. $COMPOSE_CMD up -d intelligence"
     echo -e "   c. Top Stories: ${GREEN}http://$host:$intelligence_port${NC}"
+    echo "   Ohne WEB_AUTH_MODE in .env kann jeder im Netz die Top Stories lesen"
     echo "   Links in den Top Stories führen zu BASE_URL: $(env_get BASE_URL)"
     echo ""
     echo -e "${BLUE}Nützliche Befehle:${NC}"

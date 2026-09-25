@@ -35,10 +35,18 @@ services:
 
       # Proxy-Unterstützung für externen Zugriff
       - BASE_URL=${BASE_URL:-http://localhost:8080}
+      # Adresse(n) des Reverse Proxys (CIDR): Nur von dort wird
+      # X-Forwarded-Proto geglaubt, erst dann setzt Miniflux Cookies mit
+      # "Secure". Leer lehnt Miniflux ab, daher 127.0.0.1/32 (= kein Proxy)
+      - TRUSTED_REVERSE_PROXY_NETWORKS=${TRUSTED_PROXIES:-127.0.0.1/32}
 
-      # Metriken für Monitoring
-      - METRICS_COLLECTOR=1
-      - METRICS_ALLOWED_NETWORKS=172.16.0.0/12
+      # Prometheus-Metriken unter /metrics (Standard: aus). Hinter einem
+      # Reverse Proxy nur mit METRICS_USERNAME/METRICS_PASSWORD einschalten:
+      # Alle Anfragen über den Proxy kommen aus einem 172er-Netz
+      - METRICS_COLLECTOR=${METRICS_COLLECTOR:-0}
+      - METRICS_ALLOWED_NETWORKS=${METRICS_ALLOWED_NETWORKS:-172.16.0.0/12}
+      - METRICS_USERNAME=${METRICS_USERNAME:-}
+      - METRICS_PASSWORD=${METRICS_PASSWORD:-}
     depends_on:
       db:
         condition: service_healthy
@@ -83,10 +91,14 @@ services:
       dockerfile: Dockerfile
     container_name: arsse-intelligence
     ports:
+      # Nur lokal erreichbar (hinter einem Reverse Proxy):
+      # INTELLIGENCE_PORT=127.0.0.1:8081
       - "${INTELLIGENCE_PORT:-8081}:8081"
     environment:
       - MINIFLUX_URL=http://miniflux:8080
       - MINIFLUX_API_KEY=${MINIFLUX_API_KEY}
+      # Alternativ Pfad zu einer Datei mit dem Key (Docker Secret)
+      - MINIFLUX_API_KEY_FILE=${MINIFLUX_API_KEY_FILE:-}
       - MINIFLUX_PUBLIC_URL=${BASE_URL:-}
       # Für Links, falls BASE_URL auf localhost zeigt
       - MINIFLUX_PORT=${MINIFLUX_PORT:-8080}
@@ -97,6 +109,14 @@ services:
       - DEDUP_ACTION=${DEDUP_ACTION:-}
       - DEDUP_MIN_BODY_TOKENS=${DEDUP_MIN_BODY_TOKENS:-}
       - LOG_LEVEL=${LOG_LEVEL:-}
+      # Zugriffsschutz der Top Stories (leer = config.yaml, dort "none")
+      - WEB_AUTH_MODE=${WEB_AUTH_MODE:-}
+      - WEB_USERNAME=${WEB_USERNAME:-}
+      - WEB_PASSWORD=${WEB_PASSWORD:-}
+      - WEB_PASSWORD_FILE=${WEB_PASSWORD_FILE:-}
+      - WEB_AUTH_PROXY_HEADER=${WEB_AUTH_PROXY_HEADER:-}
+      - WEB_TRUSTED_PROXIES=${WEB_TRUSTED_PROXIES:-}
+      - WEB_ALLOWED_HOSTS=${WEB_ALLOWED_HOSTS:-}
       - TZ=${TZ:-Europe/Berlin}
       # Der Container startet als root, übergibt ${DATA_PATH}/intelligence an
       # PUID:PGID (Unraid: 99:100) und läuft danach ohne Root-Rechte

@@ -177,3 +177,112 @@ def test_dedup_body_tokens_and_scope(tmp_path, monkeypatch):
     for bad in ('min_body_tokens: 0', 'min_body_tokens: "25"', 'mark_read_scope: shown'):
         with pytest.raises(ConfigError, match=bad.split(':')[0]):
             load_config(write_yaml(tmp_path, f'deduplication:\n  {bad}\n'))
+
+
+WEB_ENV = ('WEB_AUTH_MODE', 'WEB_USERNAME', 'WEB_PASSWORD', 'WEB_PASSWORD_FILE',
+           'WEB_AUTH_PROXY_HEADER', 'WEB_TRUSTED_PROXIES', 'WEB_ALLOWED_HOSTS',
+           'MINIFLUX_API_KEY', 'MINIFLUX_API_KEY_FILE')
+
+
+@pytest.fixture
+def web_env(monkeypatch):
+    for var in WEB_ENV:
+        monkeypatch.delenv(var, raising=False)
+    return monkeypatch
+
+
+def test_web_auth_defaults_to_none(web_env):
+    cfg = load_config(None)
+    assert cfg.web.auth.mode == 'none'
+    assert cfg.web.auth.proxy_header == 'Remote-User'
+    assert cfg.web.allowed_hosts == []
+
+
+def test_web_auth_from_yaml(tmp_path, web_env):
+    cfg = load_config(write_yaml(tmp_path, (
+        'web:\n  allowed_hosts: [Tower.local, "stories.example.com:443"]\n'
+        '  auth:\n    mode: proxy\n    proxy_header: X-Forwarded-User\n'
+        '    trusted_proxies: ["172.30.0.10", "fd00::/64"]\n')))
+    assert cfg.web.auth.mode == 'proxy'
+    assert cfg.web.auth.proxy_header == 'X-Forwarded-User'
+    assert cfg.web.auth.trusted_proxies == ['172.30.0.10', 'fd00::/64']
+    assert cfg.web.allowed_hosts == ['tower.local', 'stories.example.com']
+
+
+def test_web_auth_from_env(tmp_path, web_env):
+    web_env.setenv('WEB_AUTH_MODE', 'Basic')
+    web_env.setenv('WEB_USERNAME', 'leser')
+    web_env.setenv('WEB_PASSWORD', 'geheim')
+    web_env.setenv('WEB_ALLOWED_HOSTS', 'tower.local, 192.168.1.10')
+    web_env.setenv('WEB_TRUSTED_PROXIES', '172.30.0.10/32,172.30.0.11')
+    cfg = load_config(None)
+    assert (cfg.web.auth.mode, cfg.web.auth.username, cfg.web.auth.password) == \
+        ('basic', 'leser', 'geheim')
+    assert cfg.web.allowed_hosts == ['tower.local', '192.168.1.10']
+    assert cfg.web.auth.trusted_proxies == ['172.30.0.10/32', '172.30.0.11']
+
+    # WEB_PASSWORD beats a password_file from config.yaml
+    path = write_yaml(tmp_path, 'web:\n  auth:\n    password_file: /nicht/da\n')
+    assert load_config(path).web.auth.password == 'geheim'
+
+
+def test_web_password_file(tmp_path, web_env):
+    secret = tmp_path / 'web_password'
+    secret.write_text('aus-datei\n', encoding='utf-8')
+    web_env.setenv('WEB_AUTH_MODE', 'basic')
+    web_env.setenv('WEB_USERNAME', 'leser')
+    web_env.setenv('WEB_PASSWORD', 'aus-env')
+    web_env.setenv('WEB_PASSWORD_FILE', str(secret))
+    assert load_config(None).web.auth.password == 'aus-datei'
+
+    web_env.setenv('WEB_PASSWORD_FILE', str(tmp_path / 'fehlt'))
+    with pytest.raises(ConfigError, match='password_file'):
+        load_config(None)
+    secret.write_text('  \n', encoding='utf-8')
+    web_env.setenv('WEB_PASSWORD_FILE', str(secret))
+    with pytest.raises(ConfigError, match='empty'):
+        load_config(None)
+
+    # Only read when basic auth needs it
+    web_env.setenv('WEB_AUTH_MODE', 'none')
+    web_env.setenv('WEB_PASSWORD_FILE', str(tmp_path / 'fehlt'))
+    assert load_config(None).web.auth.mode == 'none'
+
+
+@pytest.mark.parametrize('env, key', [
+    ({'WEB_AUTH_MODE': 'basic', 'WEB_USERNAME': 'leser'}, 'WEB_PASSWORD'),
+    ({'WEB_AUTH_MODE': 'basic', 'WEB_PASSWORD': 'geheim'}, 'WEB_USERNAME'),
+    ({'WEB_AUTH_MODE': 'basic', 'WEB_USERNAME': 'a:b', 'WEB_PASSWORD': 'x'}, 'username'),
+    ({'WEB_AUTH_MODE': 'proxy'}, 'WEB_TRUSTED_PROXIES'),
+    ({'WEB_AUTH_MODE': 'proxy', 'WEB_TRUSTED_PROXIES': '172.30.0.300'}, 'trusted_proxies'),
+    ({'WEB_AUTH_MODE': 'miniflux'}, 'web.auth.mode'),
+    ({'WEB_ALLOWED_HOSTS': 'http://tower.local'}, 'web.allowed_hosts'),
+    ({'WEB_ALLOWED_HOSTS': 'tower.local:x'}, 'web.allowed_hosts'),
+])
+def test_web_auth_that_cannot_work_is_rejected(web_env, env, key):
+    for name, value in env.items():
+        web_env.setenv(name, value)
+    with pytest.raises(ConfigError, match=key):
+        load_config(None)
+
+
+def test_web_auth_yaml_types(tmp_path, web_env):
+    with pytest.raises(ConfigError, match='web.auth'):
+        load_config(write_yaml(tmp_path, 'web:\n  auth: basic\n'))
+    with pytest.raises(ConfigError, match='web.allowed_hosts'):
+        load_config(write_yaml(tmp_path, 'web:\n  allowed_hosts: 5\n'))
+    with pytest.raises(ConfigError, match='web.auth.username'):
+        load_config(write_yaml(tmp_path, 'web:\n  auth:\n    mode: basic\n'
+                                         '    username: 1234\n    password: x\n'))
+
+
+def test_miniflux_api_key_file(tmp_path, web_env):
+    secret = tmp_path / 'api_key'
+    secret.write_text('schluessel-aus-datei\n', encoding='utf-8')
+    web_env.setenv('MINIFLUX_API_KEY', 'aus-env')
+    web_env.setenv('MINIFLUX_API_KEY_FILE', str(secret))
+    assert load_config(None).miniflux_api_key == 'schluessel-aus-datei'
+
+    web_env.setenv('MINIFLUX_API_KEY_FILE', str(tmp_path / 'fehlt'))
+    with pytest.raises(ConfigError, match='MINIFLUX_API_KEY_FILE'):
+        load_config(None)
